@@ -89,7 +89,7 @@ def get_itinerary(request: ItineraryRequest):
     if not trip_doc:
         raise HTTPException(status_code=404, detail="Trip not found")
 
-    itinerary = trip_doc.get("initial_itinerary")  # Adjust the key if you use a different field name
+    itinerary = trip_doc.get("initialItinerary")  # Adjust the key if you use a different field name
 
     if not itinerary:
         raise HTTPException(status_code=404, detail="Itinerary not found for this trip")
