@@ -412,21 +412,25 @@ Instructions:
         response = self.llm.invoke(prompt)
         return self._parse_llm_response(response)
 
+    def safe_int(self, val, default=0):
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return default
+
     def _popular_places(self, destination):
-        # Query cities collection for top-rated places
         city_doc = cities_collection.find_one({"state": destination})
         if not city_doc:
             return []
         places = city_doc.get("places", [])
-        return sorted(places, key=lambda x: x.get("rating", 0), reverse=True)[:5]
+        return sorted(places, key=lambda x: self.safe_int(x.get("rating", 0)), reverse=True)[:5]
 
     def _hidden_gems(self, destination):
-        # Query cities collection for places with low popularity but good reviews
         city_doc = cities_collection.find_one({"state": destination})
         if not city_doc:
             return []
         places = city_doc.get("places", [])
-        return [p for p in places if p.get("popularity", 0) < 3][:5]
+        return [p for p in places if self.safe_int(p.get("popularity", 0)) < 3][:5]
 
     def _ai_recommend_activities(self, destination, travel_preferences, budget, start_date=None, end_date=None):
         # Calculate trip duration in days
@@ -476,7 +480,7 @@ Instructions:
         # Exclude already recommended
         if exclude_names:
             activities = [a for a in activities if a.get("name") not in exclude_names]
-        return sorted(activities, key=lambda x: x.get("popularity", 0), reverse=True)[:5]
+        return sorted(activities, key=lambda x: self.safe_int(x.get("popularity", 0)), reverse=True)[:5]
 
     def _hidden_activities(self, destination, exclude_names=None):
         city_doc = cities_collection.find_one({"state": destination})
@@ -488,7 +492,7 @@ Instructions:
         # Exclude already recommended
         if exclude_names:
             activities = [a for a in activities if a.get("name") not in exclude_names]
-        return [a for a in activities if a.get("popularity", 0) < 3][:5]
+        return [a for a in activities if self.safe_int(a.get("popularity", 0)) < 3][:5]
 
     def _ai_recommend_hotels(self, destination, budget, group_size, start_date=None, end_date=None):
         # Calculate trip duration in days
