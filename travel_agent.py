@@ -16,9 +16,10 @@ openai_api_key = os.getenv("OPENAI_API_KEY")
 
 # Connect to MongoDB
 client = MongoClient(mongo_uri)
-db = client['trawell_ai']
+db = client['trawell']
 cities_collection = db['cities']
-users_collection = db['users']
+trip_requests_collection = db['trip_requests']
+itineraries_collection = db['itineraries']
 
 # Set up the LLM (OpenAI GPT-4o)
 llm = ChatOpenAI(
@@ -61,24 +62,29 @@ class TravelAgent:
             )
         ]
     
-    def get_user_profile(self, user_id: str) -> str:
-        """Get user's complete profile"""
+    def get_user_profile(self, user_id: str, trip_id: str) -> str:
+        """Get user's complete trip profile from the trip_requests collection"""
         try:
-            user = users_collection.find_one({"user_id": user_id})
-            if user:
+            trip_data = trip_requests_collection.find_one({"userId": user_id, "tripId": trip_id})
+            if trip_data:
                 return json.dumps({
-                    "user_id": user.get("user_id"),
-                    "name": user.get("name"),
-                    "age": user.get("age"),
-                    "budget": user.get("budget"),
-                    "personality_answers": user.get("personality_answers", {}),
-                    "travel_dates": user.get("travel_dates"),
-                    "start_place": user.get("start_place"),
-                    "destination": user.get("destination")
+                    "user_id": trip_data.get("userId"),
+                    "trip_id": trip_data.get("tripId"),
+                    "name": trip_data.get("name"),
+                    "age": trip_data.get("age"),
+                    "budget": trip_data.get("budget"),
+                    "personality_answers": trip_data.get("travelPreferences", {}),
+                    "travel_dates": {
+                        "start_date": trip_data.get("startDate"),
+                        "end_date": trip_data.get("endDate")
+                    },
+                    "start_place": trip_data.get("startLocation"),
+                    "destination": trip_data.get("destination")
                 }, indent=2)
-            return "User not found"
+            return "Trip data not found"
         except Exception as e:
-            return f"Error getting user profile: {str(e)}"
+            return f"Error getting trip profile: {str(e)}"
+
     
     def get_places_data(self, state: str) -> str:
         """Get all places and activities data for a state"""
@@ -191,11 +197,11 @@ class TravelAgent:
         }
         return timing.get(season, "Plan based on local weather.")
     
-    def create_smart_itinerary(self, user_id: str) -> str:
+    def create_smart_itinerary(self, user_id: str, trip_id: str) -> str:
         """Create a completely AI-powered personalized itinerary"""
         try:
-            user_profile = self.get_user_profile(user_id)
-            if "User not found" in user_profile:
+            user_profile = self.get_user_profile(user_id, trip_id)
+            if "Trip data not found" in user_profile:
                 return "User not found in database"
             
             user_data = json.loads(user_profile)
@@ -279,11 +285,11 @@ Make it truly personalized based on their personality answers. Make it as suitab
         except Exception as e:
             return f"Error creating smart itinerary: {str(e)}"
     
-    def get_recommendations(self, user_id: str, query: str) -> str:
+    def get_recommendations(self, user_id: str, trip_id: str, query: str) -> str:
         """Get AI-powered recommendations"""
         try:
-            user_profile = self.get_user_profile(user_id)
-            if "User not found" in user_profile:
+            user_profile = self.get_user_profile(user_id, trip_id)
+            if "Trip data not found" in user_profile:
                 return "User not found"
             
             prompt = f"""
@@ -299,28 +305,273 @@ Provide personalized recommendations based on their personality and preferences.
             
         except Exception as e:
             return f"Error: {str(e)}"
+    
+    def generate_initial_recommendations(self, user_id: str, trip_id: str) -> dict:
+        """Generate and save initial recommendations (places, activities, hotels) for a trip in three sections each."""
+        try:
+            trip_doc = trip_requests_collection.find_one({"userId": user_id, "tripId": trip_id})
+            if not trip_doc:
+                return {"status": "error", "error": "Trip not found"}
+
+            # Extract trip details
+            trip_data = trip_doc.get("tripData", {})
+            travel_preferences = trip_doc.get("travelPreferences", {})
+            destination = trip_data.get("destination", "")
+            budget = trip_data.get("budget", 0)
+            start_date = trip_data.get("start_date", "")
+            end_date = trip_data.get("end_date", "")
+            group_size = travel_preferences.get("group_size_preference", "")
+
+            # --- PLACES RECOMMENDATION ---
+            ai_places = self._ai_recommend_places(destination, travel_preferences, budget, group_size, start_date, end_date)
+            ai_place_names = {p.get("name") for p in ai_places if p.get("name")}
+            popular_places = self._popular_places(destination)
+            popular_places = [p for p in popular_places if p.get("name") not in ai_place_names]
+            hidden_gems = self._hidden_gems(destination)
+            hidden_gems = [p for p in hidden_gems if p.get("name") not in ai_place_names]
+
+            # --- ACTIVITIES RECOMMENDATION ---
+            ai_activities = self._ai_recommend_activities(destination, travel_preferences, budget, start_date, end_date)
+            ai_activity_names = {a.get("name") for a in ai_activities if a.get("name")}
+            popular_activities = self._popular_activities(destination, exclude_names=ai_activity_names)
+            hidden_activities = self._hidden_activities(destination, exclude_names=ai_activity_names)
+
+            # --- HOTELS RECOMMENDATION ---
+            ai_hotels = self._ai_recommend_hotels(destination, budget, group_size, start_date, end_date)
+            ai_hotel_names = {h.get("name") for h in ai_hotels if h.get("name")}
+            popular_hotels = self._popular_hotels(destination, exclude_names=ai_hotel_names)
+            hidden_hotels = self._hidden_hotels(destination, exclude_names=ai_hotel_names)
+
+            initial_itinerary = {
+                "places": {
+                    "ai_recommended": ai_places,
+                    "popular": popular_places,
+                    "hidden_gems": hidden_gems
+                },
+                "activities": {
+                    "ai_recommended": ai_activities,
+                    "popular": popular_activities,
+                    "hidden_gems": hidden_activities
+                },
+                "hotels": {
+                    "ai_recommended": ai_hotels,
+                    "popular": popular_hotels,
+                    "hidden_gems": hidden_hotels
+                }
+            }
+
+            # Save to MongoDB
+            trip_requests_collection.update_one(
+                {"userId": user_id, "tripId": trip_id},
+                {"$set": {"initialItinerary": initial_itinerary}}
+            )
+
+            return {"status": "success"}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    # --- Helper methods for recommendations ---#
+    
+    def _ai_recommend_places(self, destination, travel_preferences, budget, group_size, start_date=None, end_date=None):
+        # Calculate trip duration in days
+        duration_days = 3
+        if start_date and end_date:
+            try:
+                from datetime import datetime
+                d1 = datetime.fromisoformat(str(start_date)[:10])
+                d2 = datetime.fromisoformat(str(end_date)[:10])
+                duration_days = max(1, (d2 - d1).days + 1)
+            except Exception:
+                pass
+        # Build a detailed, production-level prompt
+        prompt = f"""
+You are an expert, highly personalized travel itinerary planner. Your job is to recommend the most suitable places to visit in {destination} for a traveler with the following preferences and trip details:
+
+User Preferences:
+- Group size: {group_size}
+- Openness to new experiences: {travel_preferences.get('openness_to_new_experiences', 'N/A')}
+- Free time preference: {travel_preferences.get('free_time_preference', 'N/A')}
+- Travel excitement: {travel_preferences.get('travel_excitement', 'N/A')}
+- Travel planning style: {travel_preferences.get('travel_planning_style', 'N/A')}
+
+Trip Details:
+- Budget: {budget}
+- Trip duration: {duration_days} days (from {start_date} to {end_date})
+
+Instructions:
+- Recommend a set of places to visit, with the number of places tailored to the trip duration and user's preferences (not fixed to 3-5; could be more or less).
+- For each place, provide:
+    - name
+    - description
+    - why it's recommended for this user (based on their preferences and trip context)
+- Prioritize places that align with the user's personality and travel style.
+- Ensure the recommendations are realistic for the trip duration and budget.
+- If the user prefers hidden gems or unique experiences, include such places.
+- Output a JSON list of objects as described, with no extra text.
+"""
+        response = self.llm.invoke(prompt)
+        return self._parse_llm_response(response)
+
+    def _popular_places(self, destination):
+        # Query cities collection for top-rated places
+        city_doc = cities_collection.find_one({"state": destination})
+        if not city_doc:
+            return []
+        places = city_doc.get("places", [])
+        return sorted(places, key=lambda x: x.get("rating", 0), reverse=True)[:5]
+
+    def _hidden_gems(self, destination):
+        # Query cities collection for places with low popularity but good reviews
+        city_doc = cities_collection.find_one({"state": destination})
+        if not city_doc:
+            return []
+        places = city_doc.get("places", [])
+        return [p for p in places if p.get("popularity", 0) < 3][:5]
+
+    def _ai_recommend_activities(self, destination, travel_preferences, budget, start_date=None, end_date=None):
+        # Calculate trip duration in days
+        duration_days = 3
+        if start_date and end_date:
+            try:
+                from datetime import datetime
+                d1 = datetime.fromisoformat(str(start_date)[:10])
+                d2 = datetime.fromisoformat(str(end_date)[:10])
+                duration_days = max(1, (d2 - d1).days + 1)
+            except Exception:
+                pass
+        prompt = f"""
+You are an expert, highly personalized travel itinerary planner. Recommend the most suitable activities in {destination} for a traveler with the following preferences and trip details:
+
+User Preferences:
+- Openness to new experiences: {travel_preferences.get('openness_to_new_experiences', 'N/A')}
+- Free time preference: {travel_preferences.get('free_time_preference', 'N/A')}
+- Travel excitement: {travel_preferences.get('travel_excitement', 'N/A')}
+- Travel planning style: {travel_preferences.get('travel_planning_style', 'N/A')}
+
+Trip Details:
+- Budget: {budget}
+- Trip duration: {duration_days} days (from {start_date} to {end_date})
+
+Instructions:
+- Recommend a set of activities, with the number tailored to the trip duration and user's preferences (not fixed to 3-5; could be more or less).
+- For each activity, provide:
+    - name
+    - description
+    - why it's recommended for this user (based on their preferences and trip context)
+- Prioritize activities that align with the user's personality and travel style.
+- Ensure the recommendations are realistic for the trip duration and budget.
+- If the user prefers unique or offbeat experiences, include such activities.
+- Output a JSON list of objects as described, with no extra text.
+"""
+        response = self.llm.invoke(prompt)
+        return self._parse_llm_response(response)
+
+    def _popular_activities(self, destination, exclude_names=None):
+        city_doc = cities_collection.find_one({"state": destination})
+        if not city_doc:
+            return []
+        activities = []
+        for place in city_doc.get("places", []):
+            activities.extend(place.get("activities", []))
+        # Exclude already recommended
+        if exclude_names:
+            activities = [a for a in activities if a.get("name") not in exclude_names]
+        return sorted(activities, key=lambda x: x.get("popularity", 0), reverse=True)[:5]
+
+    def _hidden_activities(self, destination, exclude_names=None):
+        city_doc = cities_collection.find_one({"state": destination})
+        if not city_doc:
+            return []
+        activities = []
+        for place in city_doc.get("places", []):
+            activities.extend(place.get("activities", []))
+        # Exclude already recommended
+        if exclude_names:
+            activities = [a for a in activities if a.get("name") not in exclude_names]
+        return [a for a in activities if a.get("popularity", 0) < 3][:5]
+
+    def _ai_recommend_hotels(self, destination, budget, group_size, start_date=None, end_date=None):
+        # Calculate trip duration in days
+        duration_days = 3
+        if start_date and end_date:
+            try:
+                from datetime import datetime
+                d1 = datetime.fromisoformat(str(start_date)[:10])
+                d2 = datetime.fromisoformat(str(end_date)[:10])
+                duration_days = max(1, (d2 - d1).days + 1)
+            except Exception:
+                pass
+        prompt = f"""
+You are an expert, highly personalized travel itinerary planner. Recommend the most suitable hotels in {destination} for a traveler with the following preferences and trip details:
+
+User Preferences:
+- Group size: {group_size}
+
+Trip Details:
+- Budget: {budget}
+- Trip duration: {duration_days} days (from {start_date} to {end_date})
+
+Instructions:
+- Recommend a set of hotels, with the number tailored to the trip duration, group size, and budget (not fixed to 3-5; could be more or less).
+- For each hotel, provide:
+    - name
+    - description
+    - why it's recommended for this user (based on their preferences and trip context)
+- Prioritize hotels that align with the user's group size and budget.
+- Ensure the recommendations are realistic for the trip duration and budget.
+- If the user prefers unique stays or boutique hotels, include such options.
+- Output a JSON list of objects as described, with no extra text.
+"""
+        response = self.llm.invoke(prompt)
+        return self._parse_llm_response(response)
+
+    def _popular_hotels(self, destination, exclude_names=None):
+        # In production, you would query a hotels collection or API. Here, return empty.
+        # Exclude already recommended
+        return []
+
+    def _hidden_hotels(self, destination, exclude_names=None):
+        # In production, you would query a hotels collection or API. Here, return empty.
+        # Exclude already recommended
+        return []
+
+    def _parse_llm_response(self, response):
+        content = response.content if hasattr(response, 'content') else str(response)
+        try:
+            return json.loads(content)
+        except Exception:
+            try:
+                import demjson3
+                return demjson3.decode(content)
+            except Exception:
+                return []
+
 
 # Example usage
 if __name__ == "__main__":
     agent = TravelAgent()
-    
-    # Get actual user_id from database
+    # Get actual user_id and trip_id from database
     try:
-        user = users_collection.find_one()
+        user = trip_requests_collection.find_one() # Changed from users_collection to trip_requests_collection
         if user:
-            user_id = user.get("user_id")
-            print(f"Found user: {user.get('name', 'Unknown')} (ID: {user_id})")
-            print(f"Destination: {user.get('destination', 'Unknown')}")
-            print(f"Budget: {user.get('budget', 0)} INR")
-            print(f"Travel Dates: {user.get('travel_dates', 'Unknown')}")
-            print("\n" + "="*50)
-            
-            print("Creating AI-powered itinerary...")
-            itinerary = agent.create_smart_itinerary(user_id)
-            print("\n" + "="*50)
-            print("GENERATED ITINERARY:")
-            print("="*50)
-            print(itinerary)
+            user_id = user.get("userId")
+            # Find a trip for this user
+            trip = trip_requests_collection.find_one({"userId": user_id}) # Changed from users_collection to trip_requests_collection
+            if trip:
+                trip_id = trip.get("tripId")
+                print(f"Found user: {user.get('name', 'Unknown')} (ID: {user_id})")
+                print(f"Destination: {trip.get('tripData', {}).get('destination', 'Unknown')}")
+                print(f"Budget: {trip.get('tripData', {}).get('budget', 0)} INR")
+                print(f"Travel Dates: {trip.get('tripData', {}).get('start_date', 'Unknown')} to {trip.get('tripData', {}).get('end_date', 'Unknown')}")
+                print("\n" + "="*50)
+                print("Creating AI-powered itinerary...")
+                itinerary = agent.create_smart_itinerary(user_id, trip_id)
+                print("\n" + "="*50)
+                print("GENERATED ITINERARY:")
+                print("="*50)
+                print(itinerary)
+            else:
+                print("No trips found for user. Please add a trip first.")
         else:
             print("No users found in database. Please add a user first using user_profile_db.py")
     except Exception as e:
