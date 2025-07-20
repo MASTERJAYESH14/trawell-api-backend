@@ -307,7 +307,7 @@ Provide personalized recommendations based on their personality and preferences.
             return f"Error: {str(e)}"
     
     def generate_initial_recommendations(self, user_id: str, trip_id: str) -> dict:
-        """Generate and save initial recommendations (places, activities, hotels) for a trip in three sections each."""
+        """Generate and save initial recommendations in hierarchical structure: cities -> places+activities -> hotels."""
         try:
             trip_doc = trip_requests_collection.find_one({"userId": user_id, "tripId": trip_id})
             if not trip_doc:
@@ -322,48 +322,52 @@ Provide personalized recommendations based on their personality and preferences.
             end_date = trip_data.get("end_date", "")
             group_size = trip_data.get("num_travelers", "")
 
-            # --- PLACES RECOMMENDATION ---
-            ai_places = self._ai_recommend_places(destination, travel_preferences, budget, group_size, start_date, end_date)
-            ai_place_names = {p.get("name") for p in ai_places if p.get("name")}
-            popular_places = self._popular_places(destination)
-            popular_places = [p for p in popular_places if p.get("name") not in ai_place_names]
-            hidden_gems = self._hidden_gems(destination)
-            hidden_gems = [p for p in hidden_gems if p.get("name") not in ai_place_names]
+            # --- STEP 1: CITY RECOMMENDATIONS ---
+            ai_cities = self._ai_recommend_cities(destination, travel_preferences, budget, group_size, start_date, end_date)
+            ai_city_names = {c.get("name") for c in ai_cities if c.get("name")}
+            popular_cities = self._popular_cities(destination)
+            popular_cities = [c for c in popular_cities if c.get("name") not in ai_city_names]
+            hidden_gem_cities = self._hidden_gem_cities(destination)
+            hidden_gem_cities = [c for c in hidden_gem_cities if c.get("name") not in ai_city_names]
 
-            # --- ACTIVITIES RECOMMENDATION ---
-            ai_activities = self._ai_recommend_activities(destination, travel_preferences, budget, start_date, end_date)
-            ai_activity_names = {a.get("name") for a in ai_activities if a.get("name")}
-            popular_activities = self._popular_activities(destination, exclude_names=ai_activity_names)
-            hidden_activities = self._hidden_activities(destination, exclude_names=ai_activity_names)
+            # --- STEP 2: PLACES AND ACTIVITIES FOR EACH CITY ---
+            city_details = {}
+            all_cities = ai_cities + popular_cities + hidden_gem_cities
+            
+            for city in all_cities:
+                city_name = city.get("name", "")
+                if city_name:
+                    places_and_activities = self._get_places_and_activities_for_city(destination, city_name)
+                    city_details[city_name] = places_and_activities
 
-            # --- HOTELS RECOMMENDATION ---
+            # --- STEP 3: HOTELS RECOMMENDATION ---
             ai_hotels = self._ai_recommend_hotels(destination, budget, group_size, start_date, end_date)
-            ai_hotel_names = {h.get("name") for h in ai_hotels if h.get("name")}
-            popular_hotels = self._popular_hotels(destination, exclude_names=ai_hotel_names)
-            hidden_hotels = self._hidden_hotels(destination, exclude_names=ai_hotel_names)
+            popular_hotels = self._popular_hotels(destination)
+            budget_hotels = self._budget_hotels(destination)
 
             initial_itinerary = {
-                "places": {
-                    "ai_recommended": ai_places,
-                    "popular": popular_places,
-                    "hidden_gems": hidden_gems
+                "cities": {
+                    "ai_recommended": ai_cities,
+                    "popular": popular_cities,
+                    "hidden_gems": hidden_gem_cities
                 },
-                "activities": {
-                    "ai_recommended": ai_activities,
-                    "popular": popular_activities,
-                    "hidden_gems": hidden_activities
-                },
+                "city_details": city_details,
                 "hotels": {
                     "ai_recommended": ai_hotels,
                     "popular": popular_hotels,
-                    "hidden_gems": hidden_hotels
+                    "budget_friendly": budget_hotels
                 }
             }
 
             # Save to MongoDB
             trip_requests_collection.update_one(
                 {"userId": user_id, "tripId": trip_id},
-                {"$set": {"initialItinerary": initial_itinerary}}
+                {
+                    "$set": {
+                        "initialItinerary": initial_itinerary,
+                        "tripData.status": "initial_generated"
+                    }
+                }
             )
 
             return {"status": "success"}
@@ -372,7 +376,7 @@ Provide personalized recommendations based on their personality and preferences.
 
     # --- Helper methods for recommendations ---#
     
-    def _ai_recommend_places(self, destination, travel_preferences, budget, group_size, start_date=None, end_date=None):
+    def _ai_recommend_cities(self, destination, travel_preferences, budget, group_size, start_date=None, end_date=None):
         # Calculate trip duration in days
         duration_days = 3
         if start_date and end_date:
@@ -385,7 +389,7 @@ Provide personalized recommendations based on their personality and preferences.
                 pass
         # Build a detailed, production-level prompt
         prompt = f"""
-You are an expert personalized travel planner. Recommend places to visit in {destination} for a traveler with these preferences:
+You are an expert personalized travel planner. Recommend cities to visit in {destination} for a traveler with these preferences:
 
 User Preferences:
 - Group size: {group_size}
@@ -399,13 +403,13 @@ Trip Details:
 - Trip duration: {duration_days} days
 
 Instructions:
-- Recommend places based on understaing user completely , trip duration and othet things in account.
-- For each place provide: name, description
+- Recommend 3-5 cities based on user preferences, trip duration, and budget
+- For each city provide: name, description
 - Consider user's travel style and budget
 - Return ONLY a valid JSON array like this:
 [
-  {{"name": "Place Name", "description": "Brief description"}},
-  {{"name": "Another Place", "description": "Another description"}}
+  {{"name": "City Name", "description": "Brief description"}},
+  {{"name": "Another City", "description": "Another description"}}
 ]
 """
         response = self.llm.invoke(prompt)
@@ -417,42 +421,90 @@ Instructions:
         except (ValueError, TypeError):
             return default
 
-    def _popular_places(self, destination):
-        city_doc = cities_collection.find_one({"state": destination})
-        if not city_doc:
-            return []
-        places = city_doc.get("places", [])
-        # Sort by rating (higher rating = more popular)
-        return sorted(places, key=lambda x: self.safe_int(x.get("rating", 0)), reverse=True)[:5]
-
-    def _hidden_gems(self, destination):
-        city_doc = cities_collection.find_one({"state": destination})
-        if not city_doc:
-            return []
-        places = city_doc.get("places", [])
-        # For hidden gems, look for places with lower ratings or unique tags
-        hidden_gems = []
-        for place in places:
-            rating = self.safe_int(place.get("rating", 0))
-            tags = place.get("tags", [])
-            # Consider it a hidden gem if rating is low or has unique tags
-            if rating < 4 or any(tag.lower() in ['offbeat', 'hidden', 'local', 'authentic'] for tag in tags):
-                hidden_gems.append(place)
-        return hidden_gems[:5]
-
-    def _ai_recommend_activities(self, destination, travel_preferences, budget, start_date=None, end_date=None):
-        # Get places data first to extract activities from specific places
-        city_doc = cities_collection.find_one({"state": destination})
-        if not city_doc:
-            return []
+    def _popular_cities(self, destination):
+        # Get all cities in the destination state
+        cities_data = cities_collection.find({"state": destination})
+        cities = []
+        for city_doc in cities_data:
+            city_info = {
+                "name": city_doc.get("city", ""),
+                "description": city_doc.get("description", ""),
+                "type": city_doc.get("type", []),
+                "rating": city_doc.get("rating", 0),
+                "best_time_to_visit": city_doc.get("best_time_to_visit", ""),
+                "tags": city_doc.get("tags", [])
+            }
+            cities.append(city_info)
         
-        # Collect all activities from places
+        # Sort by rating (higher rating = more popular)
+        popular_cities = sorted(cities, key=lambda x: self.safe_int(x.get("rating", 0)), reverse=True)[:5]
+        return popular_cities
+
+    def _hidden_gem_cities(self, destination):
+        # Get all cities in the destination state
+        cities_data = cities_collection.find({"state": destination})
+        cities = []
+        for city_doc in cities_data:
+            city_info = {
+                "name": city_doc.get("city", ""),
+                "description": city_doc.get("description", ""),
+                "type": city_doc.get("type", []),
+                "rating": city_doc.get("rating", 0),
+                "best_time_to_visit": city_doc.get("best_time_to_visit", ""),
+                "tags": city_doc.get("tags", [])
+            }
+            cities.append(city_info)
+        
+        # For hidden gems, look for cities with lower ratings or unique tags
+        hidden_gem_cities = []
+        for city in cities:
+            rating = self.safe_int(city.get("rating", 0))
+            tags = city.get("tags", [])
+            # Consider it a hidden gem if rating is low or has unique tags
+            if rating < 4 or any(tag.lower() in ['offbeat', 'hidden', 'local', 'authentic', 'lesser-known'] for tag in tags):
+                hidden_gem_cities.append(city)
+        
+        return hidden_gem_cities[:5]
+
+    def _get_places_and_activities_for_city(self, destination, city_name):
+        """Get places and their activities for a specific city"""
+        city_doc = cities_collection.find_one({"state": destination, "city": city_name})
+        if not city_doc:
+            return {"places": [], "activities": []}
+        
+        places = city_doc.get("places", [])
         all_activities = []
-        for place in city_doc.get("places", []):
+        
+        # Extract activities from each place
+        for place in places:
             place_activities = place.get("activities", [])
             for activity in place_activities:
                 activity["place_name"] = place.get("name", "")
+                activity["city_name"] = city_name
                 all_activities.append(activity)
+        
+        return {
+            "places": places,
+            "activities": all_activities
+        }
+
+    def _ai_recommend_activities(self, destination, travel_preferences, budget, start_date=None, end_date=None):
+        # Get all cities in the destination state to extract activities from all places
+        cities_data = cities_collection.find({"state": destination})
+        if not cities_data:
+            return []
+        
+        # Collect all activities from all places in all cities
+        all_activities = []
+        for city_doc in cities_data:
+            city_name = city_doc.get("city", "")
+            places = city_doc.get("places", [])
+            for place in places:
+                place_activities = place.get("activities", [])
+                for activity in place_activities:
+                    activity["place_name"] = place.get("name", "")
+                    activity["city_name"] = city_name
+                    all_activities.append(activity)
         
         # Calculate trip duration in days
         duration_days = 3
@@ -576,9 +628,8 @@ Instructions:
         # In production, you would query a hotels collection or API
         return []
 
-    def _hidden_hotels(self, destination, exclude_names=None):
-        # For hotels, we don't use "hidden gems" concept
-        # Instead, return budget-friendly or boutique options
+    def _budget_hotels(self, destination):
+        # For budget-friendly hotels
         # For now, return empty as we don't have hotel data
         return []
 
