@@ -324,11 +324,15 @@ Provide personalized recommendations based on their personality and preferences.
 
             # --- STEP 1: CITY RECOMMENDATIONS ---
             ai_cities = self._ai_recommend_cities(destination, travel_preferences, budget, group_size, start_date, end_date)
-            ai_city_names = {c.get("name") for c in ai_cities if c.get("name")}
             popular_cities = self._popular_cities(destination)
-            popular_cities = [c for c in popular_cities if c.get("name") not in ai_city_names]
             hidden_gem_cities = self._hidden_gem_cities(destination)
-            hidden_gem_cities = [c for c in hidden_gem_cities if c.get("name") not in ai_city_names]
+
+            # Ensure no duplicates between categories
+            ai_city_names = {c.get("name") for c in ai_cities if c.get("name")}
+            popular_city_names = {c.get("name") for c in popular_cities if c.get("name")}
+
+            popular_cities = [c for c in popular_cities if c.get("name") not in ai_city_names]
+            hidden_gem_cities = [c for c in hidden_gem_cities if c.get("name") not in ai_city_names and c.get("name") not in popular_city_names]
 
             # --- STEP 2: PLACES AND ACTIVITIES FOR EACH CITY ---
             city_details = {}
@@ -428,11 +432,6 @@ Instructions:
         for city_doc in cities_data:
             city_info = {
                 "name": city_doc.get("city", ""),
-                "description": city_doc.get("description", ""),
-                "type": city_doc.get("type", []),
-                "rating": city_doc.get("rating", 0),
-                "best_time_to_visit": city_doc.get("best_time_to_visit", ""),
-                "tags": city_doc.get("tags", [])
             }
             cities.append(city_info)
         
@@ -447,11 +446,6 @@ Instructions:
         for city_doc in cities_data:
             city_info = {
                 "name": city_doc.get("city", ""),
-                "description": city_doc.get("description", ""),
-                "type": city_doc.get("type", []),
-                "rating": city_doc.get("rating", 0),
-                "best_time_to_visit": city_doc.get("best_time_to_visit", ""),
-                "tags": city_doc.get("tags", [])
             }
             cities.append(city_info)
         
