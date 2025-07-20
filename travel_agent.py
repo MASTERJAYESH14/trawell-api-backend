@@ -383,6 +383,10 @@ Provide personalized recommendations based on their personality and preferences.
                     }
                 }
             )
+            # Also update Firestore with status and MongoDB trip request _id
+            mongo_trip_doc = trip_requests_collection.find_one({"userId": user_id, "tripId": trip_id})
+            mongo_trip_id = str(mongo_trip_doc["_id"]) if mongo_trip_doc and "_id" in mongo_trip_doc else None
+            update_firestore_trip_status(user_id, trip_id, "initial_generated", mongo_trip_id)
 
             return {"status": "success"}
         except Exception as e:
@@ -403,7 +407,7 @@ Provide personalized recommendations based on their personality and preferences.
                 pass
         # Build a detailed, production-level prompt
         prompt = f"""
-You are an expert personalized travel planner. Recommend cities to visit in {destination} for a traveler with these preferences:
+You are an expert personalized real travel planner. Recommend cities to visit in {destination} for a traveler with these preferences:
 
 User Preferences:
 - Group size: {group_size}
@@ -417,7 +421,7 @@ Trip Details:
 - Trip duration: {duration_days} days
 
 Instructions:
-- Recommend 3-5 cities based on user preferences, trip duration, and budget
+- Recommend cities based on user preferences, trip duration, and budget, personality, atleast 1 city should be there, but understnad the data and then recommend number of cities and cities
 - For each city provide: name, description
 - Consider user's travel style and budget
 - Return ONLY a valid JSON array like this:
