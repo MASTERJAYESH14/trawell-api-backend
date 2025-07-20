@@ -8,6 +8,7 @@ from langchain_openai import ChatOpenAI
 from langchain.agents import initialize_agent, Tool
 from pydantic import SecretStr
 import demjson3
+from google.cloud import firestore
 
 # Load environment variables
 load_dotenv()
@@ -25,6 +26,15 @@ itineraries_collection = db['itineraries']
 llm = ChatOpenAI(
     model="gpt-4o-mini"
 )
+
+def update_firestore_trip_status(user_id, trip_id, status, mongo_itinerary_id):
+    db = firestore.Client()
+    trip_ref = db.collection('users').document(user_id).collection('trip_requests').document(trip_id)
+    update_data = {
+        'status': status,
+        'mongo_itinerary_id': mongo_itinerary_id
+    }
+    trip_ref.set(update_data, merge=True)
 
 class TravelAgent:
     def __init__(self):
@@ -145,18 +155,18 @@ class TravelAgent:
         except Exception as e:
             return f"Error getting weather info: {str(e)}"
     
-    def save_itinerary(self, itinerary_data: str) -> str:
-        """Save itinerary to database"""
+    def save_itinerary(self, itinerary_data: str, user_id: str, trip_id: str) -> str:
+        """Save itinerary to database and update Firestore status"""
         try:
             itinerary = json.loads(itinerary_data)
             itinerary["created_at"] = datetime.now().isoformat()
-            
-            itineraries_collection = db['itineraries']
             result = itineraries_collection.insert_one(itinerary)
-            
+            mongo_itinerary_id = str(result.inserted_id)
+            # Update Firestore status and MongoDB itinerary reference
+            update_firestore_trip_status(user_id, trip_id, "initial_generated", mongo_itinerary_id)
             return json.dumps({
                 "status": "success",
-                "itinerary_id": str(result.inserted_id),
+                "itinerary_id": mongo_itinerary_id,
                 "message": "Itinerary saved successfully"
             }, indent=2)
         except Exception as e:
@@ -254,7 +264,7 @@ Make it truly personalized based on their personality answers. Make it as suitab
             if isinstance(content, str):
                 try:
                     itinerary = json.loads(content)
-                    save_result = self.save_itinerary(json.dumps(itinerary))
+                    save_result = self.save_itinerary(json.dumps(itinerary), user_id, trip_id)
                     itinerary["save_status"] = json.loads(save_result)
                     return json.dumps(itinerary, indent=2)
                 except json.JSONDecodeError:
@@ -262,7 +272,7 @@ Make it truly personalized based on their personality answers. Make it as suitab
                     try:
                         itinerary = demjson3.decode(content)
                         itinerary = json.loads(json.dumps(itinerary))  # Convert to dict
-                        save_result = self.save_itinerary(json.dumps(itinerary))
+                        save_result = self.save_itinerary(json.dumps(itinerary), user_id, trip_id)
                         itinerary["save_status"] = json.loads(save_result)
                         return json.dumps(itinerary, indent=2)
                     except Exception:
@@ -273,7 +283,7 @@ Make it truly personalized based on their personality answers. Make it as suitab
                             try:
                                 itinerary = demjson3.decode(match.group(1))
                                 itinerary = json.loads(json.dumps(itinerary))  # Convert to dict
-                                save_result = self.save_itinerary(json.dumps(itinerary))
+                                save_result = self.save_itinerary(json.dumps(itinerary), user_id, trip_id)
                                 itinerary["save_status"] = json.loads(save_result)
                                 return json.dumps(itinerary, indent=2)
                             except Exception:
