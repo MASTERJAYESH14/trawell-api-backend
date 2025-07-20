@@ -71,15 +71,15 @@ class TravelAgent:
                     "user_id": trip_data.get("userId"),
                     "trip_id": trip_data.get("tripId"),
                     "name": trip_data.get("name"),
-                    "age": trip_data.get("age"),
                     "budget": trip_data.get("budget"),
                     "personality_answers": trip_data.get("travelPreferences", {}),
                     "travel_dates": {
-                        "start_date": trip_data.get("startDate"),
-                        "end_date": trip_data.get("endDate")
+                        "start_date": trip_data.get("start_date"),
+                        "end_date": trip_data.get("end_date")
                     },
-                    "start_place": trip_data.get("startLocation"),
-                    "destination": trip_data.get("destination")
+                    "start_place": trip_data.get("start_place"),
+                    "destination": trip_data.get("destination"),
+                    "num_of_travellers": trip_data.get("num_travelers")
                 }, indent=2)
             return "Trip data not found"
         except Exception as e:
@@ -320,7 +320,7 @@ Provide personalized recommendations based on their personality and preferences.
             budget = trip_data.get("budget", 0)
             start_date = trip_data.get("start_date", "")
             end_date = trip_data.get("end_date", "")
-            group_size = travel_preferences.get("group_size_preference", "")
+            group_size = trip_data.get("num_travelers", "")
 
             # --- PLACES RECOMMENDATION ---
             ai_places = self._ai_recommend_places(destination, travel_preferences, budget, group_size, start_date, end_date)
@@ -385,7 +385,7 @@ Provide personalized recommendations based on their personality and preferences.
                 pass
         # Build a detailed, production-level prompt
         prompt = f"""
-You are an expert, highly personalized travel itinerary planner. Your job is to recommend the most suitable places to visit in {destination} for a traveler with the following preferences and trip details:
+You are an expert personalized travel planner. Recommend places to visit in {destination} for a traveler with these preferences:
 
 User Preferences:
 - Group size: {group_size}
@@ -395,19 +395,18 @@ User Preferences:
 - Travel planning style: {travel_preferences.get('travel_planning_style', 'N/A')}
 
 Trip Details:
-- Budget: {budget}
-- Trip duration: {duration_days} days (from {start_date} to {end_date})
+- Budget: {budget} INR
+- Trip duration: {duration_days} days
 
 Instructions:
-- Recommend a set of places to visit, with the number of places tailored to the trip duration and user's preferences (not fixed to 3-5; could be more or less).
-- For each place, provide:
-    - name
-    - description
-    - why it's recommended for this user (based on their preferences and trip context)
-- Prioritize places that align with the user's personality and travel style.
-- Ensure the recommendations are realistic for the trip duration and budget.
-- If the user prefers hidden gems or unique experiences, include such places.
-- Output a JSON list of objects as described, with no extra text.
+- Recommend places based on understaing user completely , trip duration and othet things in account.
+- For each place provide: name, description
+- Consider user's travel style and budget
+- Return ONLY a valid JSON array like this:
+[
+  {{"name": "Place Name", "description": "Brief description"}},
+  {{"name": "Another Place", "description": "Another description"}}
+]
 """
         response = self.llm.invoke(prompt)
         return self._parse_llm_response(response)
@@ -423,6 +422,7 @@ Instructions:
         if not city_doc:
             return []
         places = city_doc.get("places", [])
+        # Sort by rating (higher rating = more popular)
         return sorted(places, key=lambda x: self.safe_int(x.get("rating", 0)), reverse=True)[:5]
 
     def _hidden_gems(self, destination):
@@ -430,9 +430,30 @@ Instructions:
         if not city_doc:
             return []
         places = city_doc.get("places", [])
-        return [p for p in places if self.safe_int(p.get("popularity", 0)) < 3][:5]
+        # For hidden gems, look for places with lower ratings or unique tags
+        hidden_gems = []
+        for place in places:
+            rating = self.safe_int(place.get("rating", 0))
+            tags = place.get("tags", [])
+            # Consider it a hidden gem if rating is low or has unique tags
+            if rating < 4 or any(tag.lower() in ['offbeat', 'hidden', 'local', 'authentic'] for tag in tags):
+                hidden_gems.append(place)
+        return hidden_gems[:5]
 
     def _ai_recommend_activities(self, destination, travel_preferences, budget, start_date=None, end_date=None):
+        # Get places data first to extract activities from specific places
+        city_doc = cities_collection.find_one({"state": destination})
+        if not city_doc:
+            return []
+        
+        # Collect all activities from places
+        all_activities = []
+        for place in city_doc.get("places", []):
+            place_activities = place.get("activities", [])
+            for activity in place_activities:
+                activity["place_name"] = place.get("name", "")
+                all_activities.append(activity)
+        
         # Calculate trip duration in days
         duration_days = 3
         if start_date and end_date:
@@ -443,32 +464,40 @@ Instructions:
                 duration_days = max(1, (d2 - d1).days + 1)
             except Exception:
                 pass
-        prompt = f"""
-You are an expert, highly personalized travel itinerary planner. Recommend the most suitable activities in {destination} for a traveler with the following preferences and trip details:
-
-User Preferences:
-- Openness to new experiences: {travel_preferences.get('openness_to_new_experiences', 'N/A')}
-- Free time preference: {travel_preferences.get('free_time_preference', 'N/A')}
-- Travel excitement: {travel_preferences.get('travel_excitement', 'N/A')}
-- Travel planning style: {travel_preferences.get('travel_planning_style', 'N/A')}
-
-Trip Details:
-- Budget: {budget}
-- Trip duration: {duration_days} days (from {start_date} to {end_date})
-
-Instructions:
-- Recommend a set of activities, with the number tailored to the trip duration and user's preferences (not fixed to 3-5; could be more or less).
-- For each activity, provide:
-    - name
-    - description
-    - why it's recommended for this user (based on their preferences and trip context)
-- Prioritize activities that align with the user's personality and travel style.
-- Ensure the recommendations are realistic for the trip duration and budget.
-- If the user prefers unique or offbeat experiences, include such activities.
-- Output a JSON list of objects as described, with no extra text.
-"""
-        response = self.llm.invoke(prompt)
-        return self._parse_llm_response(response)
+        
+        # Filter activities based on user preferences
+        filtered_activities = []
+        for activity in all_activities:
+            # Filter based on user preferences
+            if self._activity_matches_preferences(activity, travel_preferences):
+                filtered_activities.append(activity)
+        
+        # Return top activities (limit to reasonable number)
+        return filtered_activities[:10]
+    
+    def _activity_matches_preferences(self, activity, travel_preferences):
+        """Check if activity matches user preferences"""
+        activity_name = activity.get("name", "").lower()
+        activity_type = activity.get("type", "").lower()
+        
+        # Check based on travel excitement
+        travel_excitement = travel_preferences.get('travel_excitement', '').lower()
+        if travel_excitement == 'exploring' and any(word in activity_name for word in ['trek', 'hike', 'adventure', 'explore']):
+            return True
+        elif travel_excitement == 'relaxing' and any(word in activity_name for word in ['spa', 'yoga', 'meditation', 'relax']):
+            return True
+        elif travel_excitement == 'cultural' and any(word in activity_name for word in ['museum', 'temple', 'heritage', 'culture']):
+            return True
+        
+        # Check based on free time preference
+        free_time = travel_preferences.get('free_time_preference', '').lower()
+        if free_time == 'outdoor' and any(word in activity_name for word in ['outdoor', 'nature', 'park', 'garden']):
+            return True
+        elif free_time == 'indoor' and any(word in activity_name for word in ['indoor', 'museum', 'shopping', 'cinema']):
+            return True
+        
+        # Default: include if no specific preference or activity doesn't match any preference
+        return True
 
     def _popular_activities(self, destination, exclude_names=None):
         city_doc = cities_collection.find_one({"state": destination})
@@ -476,11 +505,15 @@ Instructions:
             return []
         activities = []
         for place in city_doc.get("places", []):
-            activities.extend(place.get("activities", []))
+            place_activities = place.get("activities", [])
+            for activity in place_activities:
+                activity["place_name"] = place.get("name", "")
+                activities.append(activity)
         # Exclude already recommended
         if exclude_names:
             activities = [a for a in activities if a.get("name") not in exclude_names]
-        return sorted(activities, key=lambda x: self.safe_int(x.get("popularity", 0)), reverse=True)[:5]
+        # Sort by rating if available, otherwise return first 5
+        return sorted(activities, key=lambda x: self.safe_int(x.get("rating", 0)), reverse=True)[:5]
 
     def _hidden_activities(self, destination, exclude_names=None):
         city_doc = cities_collection.find_one({"state": destination})
@@ -488,11 +521,21 @@ Instructions:
             return []
         activities = []
         for place in city_doc.get("places", []):
-            activities.extend(place.get("activities", []))
+            place_activities = place.get("activities", [])
+            for activity in place_activities:
+                activity["place_name"] = place.get("name", "")
+                activities.append(activity)
         # Exclude already recommended
         if exclude_names:
             activities = [a for a in activities if a.get("name") not in exclude_names]
-        return [a for a in activities if self.safe_int(a.get("popularity", 0)) < 3][:5]
+        # For hidden activities, look for unique or less common activities
+        hidden_activities = []
+        for activity in activities:
+            activity_name = activity.get("name", "").lower()
+            # Consider it hidden if it has unique keywords
+            if any(word in activity_name for word in ['offbeat', 'local', 'authentic', 'traditional', 'unique']):
+                hidden_activities.append(activity)
+        return hidden_activities[:5]
 
     def _ai_recommend_hotels(self, destination, budget, group_size, start_date=None, end_date=None):
         # Calculate trip duration in days
@@ -506,48 +549,59 @@ Instructions:
             except Exception:
                 pass
         prompt = f"""
-You are an expert, highly personalized travel itinerary planner. Recommend the most suitable hotels in {destination} for a traveler with the following preferences and trip details:
+You are an expert travel planner. Recommend hotels in {destination} for a traveler with these details:
 
 User Preferences:
 - Group size: {group_size}
 
 Trip Details:
-- Budget: {budget}
-- Trip duration: {duration_days} days (from {start_date} to {end_date})
+- Budget: {budget} INR
+- Trip duration: {duration_days} days
 
 Instructions:
-- Recommend a set of hotels, with the number tailored to the trip duration, group size, and budget (not fixed to 3-5; could be more or less).
-- For each hotel, provide:
-    - name
-    - description
-    - why it's recommended for this user (based on their preferences and trip context)
-- Prioritize hotels that align with the user's group size and budget.
-- Ensure the recommendations are realistic for the trip duration and budget.
-- If the user prefers unique stays or boutique hotels, include such options.
-- Output a JSON list of objects as described, with no extra text.
+- Recommend 3-5 hotels based on budget and group size
+- For each hotel provide: name, description
+- Consider budget constraints and group size
+- Return ONLY a valid JSON array like this:
+[
+  {{"name": "Hotel Name", "description": "Brief description"}},
+  {{"name": "Another Hotel", "description": "Another description"}}
+]
 """
         response = self.llm.invoke(prompt)
         return self._parse_llm_response(response)
 
     def _popular_hotels(self, destination, exclude_names=None):
-        # In production, you would query a hotels collection or API. Here, return empty.
-        # Exclude already recommended
+        # For now, return empty as we don't have hotel data
+        # In production, you would query a hotels collection or API
         return []
 
     def _hidden_hotels(self, destination, exclude_names=None):
-        # In production, you would query a hotels collection or API. Here, return empty.
-        # Exclude already recommended
+        # For hotels, we don't use "hidden gems" concept
+        # Instead, return budget-friendly or boutique options
+        # For now, return empty as we don't have hotel data
         return []
 
     def _parse_llm_response(self, response):
         content = response.content if hasattr(response, 'content') else str(response)
         try:
-            return json.loads(content)
+            # Try to extract JSON from the response
+            import re
+            # Look for JSON array or object in the response
+            json_match = re.search(r'(\[.*\]|\{.*\})', content, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+                return json.loads(json_str)
+            else:
+                # If no JSON found, try parsing the entire content
+                return json.loads(content)
         except Exception:
             try:
                 import demjson3
                 return demjson3.decode(content)
             except Exception:
+                # If all parsing fails, return empty array
+                print(f"Failed to parse LLM response: {content[:200]}...")
                 return []
 
 
