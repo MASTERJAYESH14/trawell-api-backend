@@ -415,6 +415,7 @@ User Preferences:
 - Free time preference: {travel_preferences.get('free_time_preference', 'N/A')}
 - Travel excitement: {travel_preferences.get('travel_excitement', 'N/A')}
 - Travel planning style: {travel_preferences.get('travel_planning_style', 'N/A')}
+- Travel life role: {travel_preferences.get('travel_life_role', 'N/A')}
 
 Trip Details:
 - Budget: {budget} INR
