@@ -97,13 +97,21 @@ class TravelAgent:
 
     
     def get_places_data(self, state: str) -> str:
-        """Get all places and activities data for a state"""
+        """Get all places and activities data for a state with enhanced city information"""
         try:
             places_data = cities_collection.find({"state": state})
             result = []
             for city_data in places_data:
                 city_info = {
                     "city": city_data["city"],
+                    "city_rating": city_data.get("city_rating"),
+                    "city_description": city_data.get("city_description", ""),
+                    "city_tags": city_data.get("city_tags", []),
+                    "city_image_url": city_data.get("city_image_url", ""),
+                    "city_highlights": city_data.get("city_highlights", []),
+                    "city_type": city_data.get("city_type", "heritage_city"),
+                    "accessibility": city_data.get("accessibility", "well_connected"),
+                    "best_time_to_visit": city_data.get("best_time_to_visit", ""),
                     "places": []
                 }
                 for place in city_data.get("places", []):
@@ -124,15 +132,7 @@ class TravelAgent:
                     city_info["places"].append(place_info)
                 result.append(city_info)
             
-            limited_result = []
-            for city in result:
-                limited_city = {
-                    "city": city["city"],
-                    "places": city["places"]
-                }
-                limited_result.append(limited_city)
-            
-            return json.dumps(limited_result, indent=2)
+            return json.dumps(result, indent=2)
         except Exception as e:
             return f"Error getting places data: {str(e)}"
     
@@ -222,7 +222,7 @@ class TravelAgent:
             
             places_data = self.get_places_data(state)
             
-            # Let the LLM do all the thinking!
+            # Let the LLM do all the thinking with enhanced understanding!
             prompt = f"""
 You are an expert travel planner focused on creating a personalized itinerary for a user. Given the following information, create a detailed, personalized travel itinerary.
 
@@ -231,18 +231,18 @@ If you're unsure about user's personality or preferences, instead of guessing, a
 USER PROFILE:
 {user_profile}
 
-AVAILABLE PLACES:
+AVAILABLE PLACES WITH ENHANCED CITY INFORMATION:
 {places_data}
 
 Create a detailed, personalized travel itinerary that:
-1. Matches the user's personality to the best of your ability
-2. Optimizes routes between cities based on transportation options.
-3. Plans daily activities based on their travel style and energy level (number and type of activities per day should be based on the user's personality and preferences; do not limit the number of activities unless the user's profile suggests it), include the time in a.m and p.m.
-4. Infers the likely weather, season, and provides region- and activity-specific packing tips based on the user's travel dates, destination, and planned activities (e.g., trekking gear for treks, rain gear for monsoon, etc.)
-5. Everything should be in the user's budget, budget should not be exceeded. But overall it should be close to given budget.
-6. Suggests optimal timing for activities based on weather and activity type
-7. Includes food recommendations and schedules meal breaks (breakfast, lunch, dinner, snacks) each day, food should be in the user's budget.
-8. Plans all transportation in detail:
+1. **Matches the user's personality** to the best of your ability using the enhanced city information (ratings, tags, types, accessibility)
+2. **Optimizes routes between cities** based on transportation options and city accessibility levels
+3. **Plans daily activities** based on their travel style and energy level (number and type of activities per day should be based on the user's personality and preferences; do not limit the number of activities unless the user's profile suggests it), include the time in a.m and p.m.
+4. **Infers the likely weather, season**, and provides region- and activity-specific packing tips based on the user's travel dates, destination, and planned activities (e.g., trekking gear for treks, rain gear for monsoon, etc.)
+5. **Everything should be in the user's budget**, budget should not be exceeded. But overall it should be close to given budget.
+6. **Suggests optimal timing for activities** based on weather, activity type, and city's best_time_to_visit information
+7. **Includes food recommendations** and schedules meal breaks (breakfast, lunch, dinner, snacks) each day, food should be in the user's budget.
+8. **Plans all transportation in detail**:
     - Suggest the most suitable mode of transport from the user's starting location to the destination (flight, train, bus, car, etc.), considering distance, budget, and convenience. Justify your choice.
     - After arrival, suggest local transport (cab, auto, metro, etc.) from arrival point to hotel, with estimated travel time.
     - For each day, include travel time and mode between hotel and each activity/place, and between activities.
@@ -250,11 +250,19 @@ Create a detailed, personalized travel itinerary that:
     - Make sure to mention time for each thing.
     - Ensure the plan is realistic and accounts for time spent traveling, at activities, and for meals/rest.
 
+**ENHANCED RECOMMENDATION GUIDELINES:**
+- Use city ratings to prioritize higher-rated cities for users who prefer popular destinations
+- Match user's travel excitement with city highlights and tags
+- Consider city accessibility for users with mobility concerns or group size
+- Use city types (heritage_city, modern_city, etc.) to match user preferences
+- Leverage city descriptions and highlights for better personalization
+- Consider best_time_to_visit for optimal planning
+
 Respond ONLY with a valid JSON object. All keys and string values must be in double quotes. All numbers must be numbers (no units or text). Do not include trailing commas, comments, or any explanation outside the JSON.
 
 Format as JSON with: itinerary_summary, daily_plans, budget_breakdown, personalized_tips, weather_contingency_plans, food_recommendations.
 
-Make it truly personalized based on their personality answers. Make it as suitable as possible for the user.
+Make it truly personalized based on their personality answers and the enhanced city information. Make it as suitable as possible for the user.
 """
             
             response = self.llm.invoke(prompt)
@@ -296,17 +304,42 @@ Make it truly personalized based on their personality answers. Make it as suitab
             return f"Error creating smart itinerary: {str(e)}"
     
     def get_recommendations(self, user_id: str, trip_id: str, query: str) -> str:
-        """Get AI-powered recommendations"""
+        """Get AI-powered recommendations using enhanced city information"""
         try:
             user_profile = self.get_user_profile(user_id, trip_id)
             if "Trip data not found" in user_profile:
                 return "User not found"
             
+            user_data = json.loads(user_profile)
+            state = user_data.get("destination", "").split(",")[-1].strip() if user_data.get("destination") else ""
+            
+            if not state:
+                return "Destination state not found in user profile"
+            
+            places_data = self.get_places_data(state)
+            
             prompt = f"""
-User Profile: {user_profile}
-Query: {query}
+You are an expert travel advisor. Provide personalized recommendations based on the user's profile and the enhanced city information available.
 
-Provide personalized recommendations based on their personality and preferences.
+USER PROFILE:
+{user_profile}
+
+AVAILABLE CITIES WITH ENHANCED INFORMATION:
+{places_data}
+
+USER QUERY:
+{query}
+
+INSTRUCTIONS:
+- Use the enhanced city information (ratings, tags, types, accessibility, highlights) to provide better recommendations
+- Match user's personality traits with city characteristics
+- Consider city ratings for popularity preferences
+- Use city tags to match specific interests
+- Consider accessibility for group size and mobility
+- Leverage city highlights and descriptions for detailed recommendations
+- Provide specific reasons why each recommendation matches the user's profile
+
+Provide detailed, personalized recommendations that leverage all the available city information.
 """
             
             response = self.llm.invoke(prompt)
@@ -405,11 +438,28 @@ Provide personalized recommendations based on their personality and preferences.
                 duration_days = max(1, (d2 - d1).days + 1)
             except Exception:
                 pass
-        # Build a detailed, production-level prompt
+        
+        # Get enhanced city data for better recommendations
+        cities_data = cities_collection.find({"state": destination})
+        available_cities = []
+        for city_doc in cities_data:
+            city_info = {
+                "name": city_doc.get("city", ""),
+                "rating": city_doc.get("city_rating", 4.0),
+                "description": city_doc.get("city_description", ""),
+                "tags": city_doc.get("city_tags", []),
+                "type": city_doc.get("city_type", "heritage_city"),
+                "accessibility": city_doc.get("accessibility", "well_connected"),
+                "highlights": city_doc.get("city_highlights", []),
+                "image_url": city_doc.get("city_image_url", "")
+            }
+            available_cities.append(city_info)
+        
+        # Build a detailed, production-level prompt with enhanced city understanding
         prompt = f"""
-You are an expert personalized real travel planner. Recommend cities to visit in {destination} for a traveler with these preferences:
+You are an expert personalized travel planner. Recommend cities to visit in {destination} for a traveler with these preferences:
 
-User Preferences:
+USER PREFERENCES:
 - Group size: {group_size}
 - Openness to new experiences: {travel_preferences.get('openness_to_new_experiences', 'N/A')}
 - Free time preference: {travel_preferences.get('free_time_preference', 'N/A')}
@@ -417,18 +467,27 @@ User Preferences:
 - Travel planning style: {travel_preferences.get('travel_planning_style', 'N/A')}
 - Travel life role: {travel_preferences.get('travel_life_role', 'N/A')}
 
-Trip Details:
+TRIP DETAILS:
 - Budget: {budget} INR
 - Trip duration: {duration_days} days
 
-Instructions:
-- Recommend cities based on user preferences, trip duration, and budget, personality, atleast 1 city should be there, but understnad the data and then recommend number of cities and cities
-- For each city provide: name, description
-- Consider user's travel style and budget
+AVAILABLE CITIES WITH DETAILS:
+{json.dumps(available_cities, indent=2)}
+
+INSTRUCTIONS:
+- Analyze user preferences and match them with city characteristics
+- Consider city ratings, tags, type, and accessibility
+- Match user's travel excitement with city highlights
+- Consider group size and accessibility
+- Recommend cities that align with user's personality and preferences
+- For each recommended city, provide: name, description, image_url, why_recommended
 - Return ONLY a valid JSON array like this:
 [
-  {{"name": "City Name", "description": "Brief description"}},
-  {{"name": "Another City", "description": "Another description"}}
+  {{
+    "name": "City Name",
+    "description": "Brief description",
+    "image_url": "https://example.com/image.jpg"
+  }}
 ]
 """
         response = self.llm.invoke(prompt)
@@ -441,45 +500,79 @@ Instructions:
             return default
 
     def _popular_cities(self, destination):
-        # Get all cities in the destination state
+        # Get all cities in the destination state with enhanced information
         cities_data = cities_collection.find({"state": destination})
         cities = []
         for city_doc in cities_data:
             city_info = {
                 "name": city_doc.get("city", ""),
+                "rating": city_doc.get("city_rating"),
+                "description": city_doc.get("city_description", ""),
+                "tags": city_doc.get("city_tags", []),
+                "type": city_doc.get("city_type", "heritage_city"),
+                "accessibility": city_doc.get("accessibility", "well_connected"),
+                "highlights": city_doc.get("city_highlights", []),
+                "image_url": city_doc.get("city_image_url", "")
             }
             cities.append(city_info)
         
-        # Sort by rating (higher rating = more popular)
-        popular_cities = sorted(cities, key=lambda x: self.safe_int(x.get("rating", 0)), reverse=True)[:5]
+        # Sort by city rating (higher rating = more popular)
+        popular_cities = sorted(cities, key=lambda x: float(x.get("rating", 0)), reverse=True)[:5]
         return popular_cities
 
     def _hidden_gem_cities(self, destination):
-        # Get all cities in the destination state
+        # Get all cities in the destination state with enhanced information
         cities_data = cities_collection.find({"state": destination})
         cities = []
         for city_doc in cities_data:
             city_info = {
                 "name": city_doc.get("city", ""),
+                "rating": city_doc.get("city_rating", 4.0),
+                "description": city_doc.get("city_description", ""),
+                "tags": city_doc.get("city_tags", []),
+                "type": city_doc.get("city_type", "heritage_city"),
+                "accessibility": city_doc.get("accessibility", "well_connected"),
+                "highlights": city_doc.get("city_highlights", []),
+                "image_url": city_doc.get("city_image_url", "")
             }
             cities.append(city_info)
         
         # For hidden gems, look for cities with lower ratings or unique tags
         hidden_gem_cities = []
         for city in cities:
-            rating = self.safe_int(city.get("rating", 0))
+            rating = float(city.get("rating", 0))
             tags = city.get("tags", [])
-            # Consider it a hidden gem if rating is low or has unique tags
-            if rating < 4 or any(tag.lower() in ['offbeat', 'hidden', 'local', 'authentic', 'lesser-known'] for tag in tags):
+            city_type = city.get("type", "").lower()
+            
+            # Consider it a hidden gem if:
+            # 1. Rating is lower (less touristy)
+            # 2. Has unique/offbeat tags
+            # 3. Is a specific type that's less common
+            if (rating < 4.0 or 
+                any(tag.lower() in ['offbeat', 'hidden', 'local', 'authentic', 'lesser-known', 'traditional'] for tag in tags) or
+                city_type in ['spiritual_city', 'adventure_destination']):
                 hidden_gem_cities.append(city)
         
         return hidden_gem_cities[:5]
 
     def _get_places_and_activities_for_city(self, destination, city_name):
-        """Get places and their activities for a specific city"""
+        """Get places and their activities for a specific city with enhanced city information"""
         city_doc = cities_collection.find_one({"state": destination, "city": city_name})
         if not city_doc:
-            return {"places": [], "activities": []}
+            return {"places": [], "activities": [], "city_info": {}}
+        
+        # Enhanced city information
+        city_info = {
+            "name": city_doc.get("city", ""),
+            "rating": city_doc.get("city_rating", 4.0),
+            "description": city_doc.get("city_description", ""),
+            "tags": city_doc.get("city_tags", []),
+            "type": city_doc.get("city_type", "heritage_city"),
+            "accessibility": city_doc.get("accessibility", "well_connected"),
+            "highlights": city_doc.get("city_highlights", []),
+            "image_url": city_doc.get("city_image_url", ""),
+            "best_time_to_visit": city_doc.get("best_time_to_visit", "")
+        }
         
         places = city_doc.get("places", [])
         all_activities = []
@@ -493,6 +586,7 @@ Instructions:
                 all_activities.append(activity)
         
         return {
+            "city_info": city_info,
             "places": places,
             "activities": all_activities
         }
