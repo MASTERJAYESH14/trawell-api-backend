@@ -370,12 +370,74 @@ Provide detailed, personalized recommendations that leverage all the available c
             popular_cities = self._popular_cities(destination)
             hidden_gem_cities = self._hidden_gem_cities(destination)
 
+            # Debug: Print what we're getting
+            print(f"AI Cities: {len(ai_cities)}")
+            print(f"Popular Cities: {len(popular_cities)}")
+            print(f"Hidden Gem Cities: {len(hidden_gem_cities)}")
+
             # Ensure no duplicates between categories
             ai_city_names = {c.get("name") for c in ai_cities if c.get("name")}
             popular_city_names = {c.get("name") for c in popular_cities if c.get("name")}
 
             popular_cities = [c for c in popular_cities if c.get("name") not in ai_city_names]
             hidden_gem_cities = [c for c in hidden_gem_cities if c.get("name") not in ai_city_names and c.get("name") not in popular_city_names]
+
+            print(f"After deduplication - Popular: {len(popular_cities)}, Hidden Gems: {len(hidden_gem_cities)}")
+
+            # Ensure we have at least some cities in each category
+            if len(popular_cities) == 0:
+                print("No popular cities after deduplication, adding some back...")
+                all_cities_data = cities_collection.find({"state": destination})
+                all_cities = []
+                for city_doc in all_cities_data:
+                    city_info = {
+                        "name": city_doc.get("city", ""),
+                        "rating": city_doc.get("city_rating", 4.0),
+                        "description": city_doc.get("city_description", ""),
+                        "tags": city_doc.get("city_tags", []),
+                        "type": city_doc.get("city_type", "heritage_city"),
+                        "accessibility": city_doc.get("accessibility", "well_connected"),
+                        "highlights": city_doc.get("city_highlights", []),
+                        "image_url": city_doc.get("city_image_url", "")
+                    }
+                    all_cities.append(city_info)
+                
+                # Add top rated cities as popular
+                sorted_cities = sorted(all_cities, key=lambda x: float(x.get("rating", 0)), reverse=True)
+                popular_cities = [c for c in sorted_cities[:3] if c.get("name") not in ai_city_names]
+
+            if len(hidden_gem_cities) == 0:
+                print("No hidden gem cities after deduplication, adding some back...")
+                all_cities_data = cities_collection.find({"state": destination})
+                all_cities = []
+                for city_doc in all_cities_data:
+                    city_info = {
+                        "name": city_doc.get("city", ""),
+                        "rating": city_doc.get("city_rating", 4.0),
+                        "description": city_doc.get("city_description", ""),
+                        "tags": city_doc.get("city_tags", []),
+                        "type": city_doc.get("city_type", "heritage_city"),
+                        "accessibility": city_doc.get("accessibility", "well_connected"),
+                        "highlights": city_doc.get("city_highlights", []),
+                        "image_url": city_doc.get("city_image_url", "")
+                    }
+                    all_cities.append(city_info)
+                
+                # Add lower rated or unique cities as hidden gems
+                hidden_candidates = []
+                for city in all_cities:
+                    rating = float(city.get("rating", 0))
+                    tags = city.get("tags", [])
+                    city_type = city.get("type", "").lower()
+                    
+                    if (rating < 4.0 or 
+                        any(tag.lower() in ['offbeat', 'hidden', 'local', 'authentic', 'lesser-known', 'traditional'] for tag in tags) or
+                        city_type in ['spiritual_city', 'adventure_destination']):
+                        hidden_candidates.append(city)
+                
+                hidden_gem_cities = [c for c in hidden_candidates[:3] if c.get("name") not in ai_city_names and c.get("name") not in {c.get("name") for c in popular_cities}]
+
+            print(f"Final counts - AI: {len(ai_cities)}, Popular: {len(popular_cities)}, Hidden Gems: {len(hidden_gem_cities)}")
 
             # --- STEP 2: PLACES AND ACTIVITIES FOR EACH CITY ---
             city_details = {}
@@ -486,12 +548,33 @@ INSTRUCTIONS:
   {{
     "name": "City Name",
     "description": "Brief description",
-    "image_url": "https://example.com/image.jpg"
+    "image_url": "https://example.com/image.jpg",
   }}
 ]
 """
         response = self.llm.invoke(prompt)
-        return self._parse_llm_response(response)
+        ai_recommendations = self._parse_llm_response(response)
+        
+        # Convert AI recommendations to match the structure of popular/hidden gem cities
+        enhanced_ai_cities = []
+        for ai_city in ai_recommendations:
+            # Find the full city data from available_cities
+            matching_city = next((city for city in available_cities if city.get("name") == ai_city.get("name")), None)
+            if matching_city:
+                enhanced_city = {
+                    "name": ai_city.get("name"),
+                    "rating": matching_city.get("rating", 4.0),
+                    "description": ai_city.get("description", matching_city.get("description", "")),
+                    "tags": matching_city.get("tags", []),
+                    "type": matching_city.get("type", "heritage_city"),
+                    "accessibility": matching_city.get("accessibility", "well_connected"),
+                    "highlights": matching_city.get("highlights", []),
+                    "image_url": ai_city.get("image_url", matching_city.get("image_url", "")),
+                    "why_recommended": ai_city.get("why_recommended", "")
+                }
+                enhanced_ai_cities.append(enhanced_city)
+        
+        return enhanced_ai_cities
 
     def safe_int(self, val, default=0):
         try:
@@ -543,11 +626,6 @@ INSTRUCTIONS:
             rating = float(city.get("rating", 0))
             tags = city.get("tags", [])
             city_type = city.get("type", "").lower()
-            
-            # Consider it a hidden gem if:
-            # 1. Rating is lower (less touristy)
-            # 2. Has unique/offbeat tags
-            # 3. Is a specific type that's less common
             if (rating < 4.0 or 
                 any(tag.lower() in ['offbeat', 'hidden', 'local', 'authentic', 'lesser-known', 'traditional'] for tag in tags) or
                 city_type in ['spiritual_city', 'adventure_destination']):
