@@ -533,17 +533,25 @@ TRIP DETAILS:
 - Budget: {budget} INR
 - Trip duration: {duration_days} days
 
-AVAILABLE CITIES WITH DETAILS:
+AVAILABLE CITIES WITH ENHANCED INFORMATION:
 {json.dumps(available_cities, indent=2)}
 
-INSTRUCTIONS:
+**ENHANCED RECOMMENDATION GUIDELINES:**
+- Use city ratings to prioritize higher-rated cities for users who prefer popular destinations
+- Match user's travel excitement with city highlights and tags
+- Consider city accessibility for users with mobility concerns or group size
+- Use city types (heritage_city, modern_city, etc.) to match user preferences
+- Leverage city descriptions and highlights for better personalization
+- Consider best_time_to_visit for optimal planning
 - Analyze user preferences and match them with city characteristics
 - Consider city ratings, tags, type, and accessibility
 - Match user's travel excitement with city highlights
 - Consider group size and accessibility
 - Recommend cities that align with user's personality and preferences
-- For each recommended city, provide: name, description, image_url, why_recommended
-- Return ONLY a valid JSON array like this:
+- While recommeding the cities, keep in mind the duration of travel, the travel time between cities, take account of user preference, and then recommend the cities perfect to the duration of user's travel!
+For each recommended city, provide: name, description, image_url
+
+Return ONLY a valid JSON array like this:
 [
   {{
     "name": "City Name",
@@ -551,6 +559,8 @@ INSTRUCTIONS:
     "image_url": "https://example.com/image.jpg",
   }}
 ]
+
+Make it truly personalized based on their personality answers and the enhanced city information. Make it as suitable as possible for the user.
 """
         response = self.llm.invoke(prompt)
         ai_recommendations = self._parse_llm_response(response)
@@ -688,7 +698,6 @@ INSTRUCTIONS:
                     all_activities.append(activity)
         
         # Calculate trip duration in days
-        duration_days = 3
         if start_date and end_date:
             try:
                 from datetime import datetime
