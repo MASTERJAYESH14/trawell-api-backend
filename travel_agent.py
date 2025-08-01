@@ -667,6 +667,8 @@ Make it truly personalized based on their personality answers and the enhanced c
         for place in places:
             if "image_base64" in place:
                 del place["image_base64"]
+            if "image_url" in place:
+                del place["image_url"]
         
         all_activities = []
         
