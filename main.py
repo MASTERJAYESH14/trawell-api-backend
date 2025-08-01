@@ -20,7 +20,6 @@ firestore_client = firestore.Client()
 mongo_client = MongoClient(os.getenv("MONGODB_URI"))
 mongo_db = mongo_client["trawell"]
 mongo_collection = mongo_db["trip_requests"]
-cities_collection = mongo_db["cities"]
 
 # Request model
 class SyncRequest(BaseModel):
@@ -94,29 +93,6 @@ def get_itinerary(request: ItineraryRequest):
 
     if not itinerary:
         raise HTTPException(status_code=404, detail="Itinerary not found for this trip")
-
-    # Get destination from trip data
-    trip_data = trip_doc.get("tripData", {})
-    destination = trip_data.get("destination", "")
-
-    # Add images to places only
-    if itinerary and destination:
-        # Add images to places in city_details
-        city_details = itinerary.get("city_details", {})
-        for city_name, city_data in city_details.items():
-            # Places already have image_base64 from MongoDB, just ensure they're included
-            places = city_data.get("places", [])
-            for place in places:
-                # If place doesn't have image_base64, try to get it from MongoDB
-                if not place.get("image_base64"):
-                    city_doc = cities_collection.find_one({"state": destination, "city": city_name})
-                    if city_doc:
-                        city_places = city_doc.get("places", [])
-                        for city_place in city_places:
-                            if city_place.get("name") == place.get("name"):
-                                if city_place.get("image_base64"):
-                                    place["image_base64"] = city_place.get("image_base64")
-                                break
 
     return {
         "status": "success",
