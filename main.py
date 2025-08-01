@@ -20,11 +20,17 @@ firestore_client = firestore.Client()
 mongo_client = MongoClient(os.getenv("MONGODB_URI"))
 mongo_db = mongo_client["trawell"]
 mongo_collection = mongo_db["trip_requests"]
+cities_collection = mongo_db["cities"]
 
 # Request model
 class SyncRequest(BaseModel):
     userId: str
     tripId: str
+
+class ImageRequest(BaseModel):
+    place_name: str
+    city_name: str
+    state_name: str
 
 @app.post("/sync_trip")
 def sync_trip(request: SyncRequest):
@@ -99,4 +105,30 @@ def get_itinerary(request: ItineraryRequest):
         "message": "Itinerary fetched successfully",
         "data": itinerary
     }
+
+@app.post("/get_place_image")
+def get_place_image(request: ImageRequest):
+    """Get base64 image for a specific place"""
+    try:
+        city_doc = cities_collection.find_one({"state": request.state_name, "city": request.city_name})
+        if city_doc:
+            places = city_doc.get("places", [])
+            for place in places:
+                if place.get("name") == request.place_name:
+                    image_base64 = place.get("image_base64")
+                    if image_base64:
+                        return {
+                            "status": "success",
+                            "image_base64": image_base64
+                        }
+        
+        return {
+            "status": "error",
+            "message": "Image not found"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 

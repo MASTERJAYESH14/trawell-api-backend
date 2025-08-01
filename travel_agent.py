@@ -663,6 +663,11 @@ Make it truly personalized based on their personality answers and the enhanced c
         }
         
         places = city_doc.get("places", [])
+        # Filter out image_base64 to reduce memory usage
+        for place in places:
+            if "image_base64" in place:
+                del place["image_base64"]
+        
         all_activities = []
         
         # Extract activities from each place
