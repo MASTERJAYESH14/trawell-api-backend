@@ -1,7 +1,8 @@
 import os
 import json
+import pandas as pd
 from datetime import datetime
-from typing import List
+from typing import List, Dict, Optional, Tuple
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -9,6 +10,7 @@ from langchain.agents import initialize_agent, Tool
 from pydantic import SecretStr
 import demjson3
 from google.cloud import firestore
+import re
 
 # Load environment variables
 load_dotenv()
@@ -21,6 +23,14 @@ db = client['trawell']
 cities_collection = db['cities']
 trip_requests_collection = db['trip_requests']
 itineraries_collection = db['itineraries']
+
+# Load city-state mapping
+try:
+    cities_df = pd.read_csv("Indian_Cities_States.csv")
+    CITY_STATE_MAPPING = dict(zip(cities_df['city'].str.lower(), cities_df['state']))
+except Exception as e:
+    print(f"Warning: Could not load city-state mapping: {e}")
+    CITY_STATE_MAPPING = {}
 
 # Set up the LLM (OpenAI GPT-4o)
 llm = ChatOpenAI(
@@ -71,6 +81,718 @@ class TravelAgent:
                 description="Save the generated itinerary to database"
             )
         ]
+    
+    def parse_destination_input(self, destination_input: str) -> Dict[str, any]:
+        """
+        Intelligently parse destination input to determine if it's a state, city, or landmark
+        Returns: {
+            'input_type': 'state'|'city'|'landmark',
+            'parsed_value': str,
+            'state': str,
+            'city': str,
+            'landmark': str,
+            'confidence': float
+        }
+        """
+        input_lower = destination_input.strip().lower()
+        
+        # Check if it's a state (exact match)
+        all_states = set(CITY_STATE_MAPPING.values())
+        if input_lower in [state.lower() for state in all_states]:
+            return {
+                'input_type': 'state',
+                'parsed_value': input_lower,
+                'state': input_lower,
+                'city': None,
+                'landmark': None,
+                'confidence': 1.0
+            }
+        
+        # Check if it's a city
+        if input_lower in CITY_STATE_MAPPING:
+            state = CITY_STATE_MAPPING[input_lower]
+            return {
+                'input_type': 'city',
+                'parsed_value': input_lower,
+                'state': state.lower(),
+                'city': input_lower,
+                'landmark': None,
+                'confidence': 0.9
+            }
+        
+        # Check for partial city matches
+        for city in CITY_STATE_MAPPING.keys():
+            if input_lower in city or city in input_lower:
+                state = CITY_STATE_MAPPING[city]
+                return {
+                    'input_type': 'city',
+                    'parsed_value': city,
+                    'state': state.lower(),
+                    'city': city,
+                    'landmark': None,
+                    'confidence': 0.8
+                }
+        
+        # Check if it's a landmark by searching in places
+        landmark_result = self._find_landmark_in_places(input_lower)
+        if landmark_result:
+            return {
+                'input_type': 'landmark',
+                'parsed_value': input_lower,
+                'state': landmark_result['state'],
+                'city': landmark_result['city'],
+                'landmark': landmark_result['landmark'],
+                'confidence': 0.7
+            }
+        
+        # If nothing found, assume it might be a state and try fuzzy matching
+        for state in all_states:
+            if input_lower in state.lower() or state.lower() in input_lower:
+                return {
+                    'input_type': 'state',
+                    'parsed_value': state.lower(),
+                    'state': state.lower(),
+                    'city': None,
+                    'landmark': None,
+                    'confidence': 0.6
+                }
+        
+        # Default: assume it's a state and return as-is
+        return {
+            'input_type': 'state',
+            'parsed_value': input_lower,
+            'state': input_lower,
+            'city': None,
+            'landmark': None,
+            'confidence': 0.3
+        }
+    
+    def _find_landmark_in_places(self, landmark_name: str) -> Optional[Dict]:
+        """Search for a landmark across all places in the database"""
+        try:
+            # Search in all cities
+            all_cities = cities_collection.find({})
+            
+            for city_doc in all_cities:
+                city_name = city_doc.get("city", "").lower()
+                state_name = city_doc.get("state", "").lower()
+                places = city_doc.get("places", [])
+                
+                for place in places:
+                    place_name = place.get("name", "").lower()
+                    if (landmark_name in place_name or 
+                        place_name in landmark_name or
+                        any(word in place_name for word in landmark_name.split())):
+                        return {
+                            'state': state_name,
+                            'city': city_name,
+                            'landmark': place.get("name", ""),
+                            'place_data': place
+                        }
+            
+            return None
+        except Exception as e:
+            print(f"Error searching for landmark: {e}")
+            return None
+    
+    def get_enhanced_recommendations(self, user_id: str, trip_id: str, destination_input: str) -> Dict:
+        """
+        Enhanced recommendation system that handles state, city, and landmark inputs
+        """
+        try:
+            # Parse the destination input
+            parsed_input = self.parse_destination_input(destination_input)
+            input_type = parsed_input['input_type']
+            
+            # Get user profile
+            user_profile = self.get_user_profile(user_id, trip_id)
+            if "Trip data not found" in user_profile:
+                return {"status": "error", "message": "User not found in database"}
+            
+            user_data = json.loads(user_profile)
+            
+            if input_type == 'state':
+                return self._get_state_recommendations(parsed_input, user_data)
+            elif input_type == 'city':
+                return self._get_city_recommendations(parsed_input, user_data)
+            elif input_type == 'landmark':
+                return self._get_landmark_recommendations(parsed_input, user_data)
+            else:
+                return {"status": "error", "message": "Unable to parse destination input"}
+                
+        except Exception as e:
+            return {"status": "error", "message": f"Error generating recommendations: {str(e)}"}
+    
+    def _get_state_recommendations(self, parsed_input: Dict, user_data: Dict) -> Dict:
+        """Generate recommendations for state input (original functionality)"""
+        state = parsed_input['state']
+        
+        # Get all cities in the state
+        cities_data = cities_collection.find({"state": state})
+        all_cities = []
+        for city_doc in cities_data:
+            city_info = {
+                "name": city_doc.get("city", ""),
+                "rating": city_doc.get("city_rating", 4.0),
+                "description": city_doc.get("city_description", ""),
+                "tags": city_doc.get("city_tags", []),
+                "type": city_doc.get("city_type", "heritage_city"),
+                "accessibility": city_doc.get("accessibility", "well_connected"),
+                "highlights": city_doc.get("city_highlights", []),
+                "image_url": city_doc.get("city_image_url", "")
+            }
+            all_cities.append(city_info)
+        
+        # Categorize cities
+        ai_cities = self._ai_recommend_cities(state, user_data.get("personality_answers", {}), 
+                                            user_data.get("budget", 0), user_data.get("num_of_travellers", 1))
+        popular_cities = sorted(all_cities, key=lambda x: float(x.get("rating", 0)), reverse=True)[:5]
+        hidden_gem_cities = [c for c in all_cities if float(c.get("rating", 0)) < 4.0][:5]
+        
+        return {
+            "status": "success",
+            "input_type": "state",
+            "parsed_input": parsed_input,
+            "recommendations": {
+                "cities": {
+                    "ai_recommended": ai_cities,
+                    "popular": popular_cities,
+                    "hidden_gems": hidden_gem_cities
+                },
+                "message": f"Here are city recommendations for {state.title()}"
+            }
+        }
+    
+    def _get_city_recommendations(self, parsed_input: Dict, user_data: Dict) -> Dict:
+        """Generate recommendations for city input with enhanced personalization"""
+        state = parsed_input['state']
+        city = parsed_input['city']
+        
+        # Get city data
+        city_doc = cities_collection.find_one({"state": state, "city": city})
+        if not city_doc:
+            return {"status": "error", "message": f"City {city} not found in {state}"}
+        
+        # Get places in the city
+        places = city_doc.get("places", [])
+        
+        # Add city and state info to each place for personalization
+        for place in places:
+            place["city"] = city
+            place["state"] = state
+        
+        # Get personalized recommendations
+        personalized_places = self._get_personalized_recommendations(places, user_data, limit=8)
+        
+        # Categorize places (fallback to original method if personalization fails)
+        if len(personalized_places) > 0:
+            popular_places = [p for p in personalized_places if float(p.get("rating", 0)) >= 4.0][:5]
+            hidden_gem_places = [p for p in personalized_places if float(p.get("rating", 0)) < 4.0][:5]
+        else:
+            popular_places = sorted(places, key=lambda x: float(x.get("rating", 0)), reverse=True)[:5]
+            hidden_gem_places = [p for p in places if float(p.get("rating", 0)) < 4.0][:5]
+        
+        # Get nearby cities in the same state
+        nearby_cities = self._get_nearby_cities(state, city)
+        
+        return {
+            "status": "success",
+            "input_type": "city",
+            "parsed_input": parsed_input,
+            "recommendations": {
+                "city_info": {
+                    "name": city_doc.get("city", ""),
+                    "rating": city_doc.get("city_rating", 4.0),
+                    "description": city_doc.get("city_description", ""),
+                    "tags": city_doc.get("city_tags", []),
+                    "type": city_doc.get("city_type", "heritage_city"),
+                    "highlights": city_doc.get("city_highlights", []),
+                    "image_url": city_doc.get("city_image_url", ""),
+                    "best_time_to_visit": city_doc.get("best_time_to_visit", "")
+                },
+                "places": {
+                    "personalized": personalized_places[:5],
+                    "popular": popular_places,
+                    "hidden_gems": hidden_gem_places,
+                    "all_places": places
+                },
+                "nearby_cities": nearby_cities,
+                "personalization_insights": {
+                    "user_preferences": user_data.get("personality_answers", {}),
+                    "budget": user_data.get("budget", 0),
+                    "group_size": user_data.get("num_of_travellers", 1)
+                },
+                "message": f"Here are personalized recommendations for {city.title()}, {state.title()}"
+            }
+        }
+    
+    def _get_landmark_recommendations(self, parsed_input: Dict, user_data: Dict) -> Dict:
+        """Generate recommendations for landmark input with enhanced personalization"""
+        state = parsed_input['state']
+        city = parsed_input['city']
+        landmark = parsed_input['landmark']
+        
+        # Get city data
+        city_doc = cities_collection.find_one({"state": state, "city": city})
+        if not city_doc:
+            return {"status": "error", "message": f"City {city} not found in {state}"}
+        
+        # Find the specific landmark
+        places = city_doc.get("places", [])
+        target_place = None
+        other_places = []
+        
+        for place in places:
+            if place.get("name", "").lower() == landmark.lower():
+                target_place = place
+            else:
+                other_places.append(place)
+        
+        if not target_place:
+            return {"status": "error", "message": f"Landmark {landmark} not found in {city}"}
+        
+        # Add city and state info to other places for personalization
+        for place in other_places:
+            place["city"] = city
+            place["state"] = state
+        
+        # Get personalized nearby places
+        personalized_nearby = self._get_personalized_recommendations(other_places, user_data, limit=6)
+        
+        # Get related cities in the same state
+        related_cities = self._get_related_cities(state, city, target_place)
+        
+        # Add personalization insights for the target landmark
+        target_place["city"] = city
+        target_place["state"] = state
+        landmark_score = self._enhanced_personalization_score(target_place, user_data.get("personality_answers", {}))
+        
+        return {
+            "status": "success",
+            "input_type": "landmark",
+            "parsed_input": parsed_input,
+            "recommendations": {
+                "highlighted_landmark": {
+                    "name": target_place.get("name", ""),
+                    "description": target_place.get("description", ""),
+                    "rating": target_place.get("rating", 0),
+                    "type": target_place.get("type", []),
+                    "tags": target_place.get("tags", []),
+                    "time_required": target_place.get("time_required", ""),
+                    "cost": target_place.get("cost", 0),
+                    "activities": target_place.get("activities", []),
+                    "personalization_score": round(landmark_score, 3),
+                    "why_recommended": self._get_why_recommended(target_place, user_data.get("personality_answers", {}))
+                },
+                "nearby_places": {
+                    "personalized": personalized_nearby[:3],
+                    "all": sorted(other_places, key=lambda x: float(x.get("rating", 0)), reverse=True)[:5]
+                },
+                "related_cities": related_cities,
+                "city_info": {
+                    "name": city_doc.get("city", ""),
+                    "state": state,
+                    "description": city_doc.get("city_description", ""),
+                    "highlights": city_doc.get("city_highlights", []),
+                    "best_time_to_visit": city_doc.get("best_time_to_visit", "")
+                },
+                "personalization_insights": {
+                    "user_preferences": user_data.get("personality_answers", {}),
+                    "budget": user_data.get("budget", 0),
+                    "group_size": user_data.get("num_of_travellers", 1)
+                },
+                "message": f"Here are personalized recommendations for {landmark} in {city.title()}, {state.title()}"
+            }
+        }
+    
+    def _get_nearby_cities(self, state: str, current_city: str) -> List[Dict]:
+        """Get nearby cities in the same state"""
+        try:
+            cities_data = cities_collection.find({"state": state})
+            nearby_cities = []
+            
+            for city_doc in cities_data:
+                city_name = city_doc.get("city", "").lower()
+                if city_name != current_city:
+                    city_info = {
+                        "name": city_doc.get("city", ""),
+                        "rating": city_doc.get("city_rating", 4.0),
+                        "description": city_doc.get("city_description", ""),
+                        "tags": city_doc.get("city_tags", []),
+                        "type": city_doc.get("city_type", "heritage_city"),
+                        "highlights": city_doc.get("city_highlights", []),
+                        "image_url": city_doc.get("city_image_url", "")
+                    }
+                    nearby_cities.append(city_info)
+            
+            # Return top 3 nearby cities by rating
+            return sorted(nearby_cities, key=lambda x: float(x.get("rating", 0)), reverse=True)[:3]
+        except Exception as e:
+            print(f"Error getting nearby cities: {e}")
+            return []
+    
+    def _get_related_cities(self, state: str, current_city: str, landmark_data: Dict) -> List[Dict]:
+        """Get related cities based on landmark characteristics"""
+        try:
+            cities_data = cities_collection.find({"state": state})
+            related_cities = []
+            
+            # Get landmark tags and type
+            landmark_tags = landmark_data.get("tags", [])
+            landmark_type = landmark_data.get("type", [])
+            
+            for city_doc in cities_data:
+                city_name = city_doc.get("city", "").lower()
+                if city_name != current_city:
+                    city_tags = city_doc.get("city_tags", [])
+                    city_type = city_doc.get("city_type", "")
+                    
+                    # Check for similarity in tags or type
+                    tag_similarity = any(tag in city_tags for tag in landmark_tags)
+                    type_similarity = any(t in city_type.lower() for t in landmark_type)
+                    
+                    if tag_similarity or type_similarity:
+                        city_info = {
+                            "name": city_doc.get("city", ""),
+                            "rating": city_doc.get("city_rating", 4.0),
+                            "description": city_doc.get("city_description", ""),
+                            "tags": city_tags,
+                            "type": city_type,
+                            "highlights": city_doc.get("city_highlights", []),
+                            "image_url": city_doc.get("city_image_url", ""),
+                            "similarity_reason": "Similar attractions" if tag_similarity else "Similar city type"
+                        }
+                        related_cities.append(city_info)
+            
+            # Return top 3 related cities
+            return sorted(related_cities, key=lambda x: float(x.get("rating", 0)), reverse=True)[:3]
+        except Exception as e:
+            print(f"Error getting related cities: {e}")
+            return []
+
+    def _enhanced_personalization_score(self, item_data: Dict, user_preferences: Dict) -> float:
+        """
+        Calculate a personalized score for any item (city/place/activity) based on user preferences
+        Returns a score between 0 and 1
+        """
+        score = 0.0
+        total_weight = 0.0
+        
+        # Extract user preferences
+        travel_excitement = user_preferences.get('travel_excitement', '').lower()
+        free_time_preference = user_preferences.get('free_time_preference', '').lower()
+        openness_to_new_experiences = user_preferences.get('openness_to_new_experiences', '').lower()
+        travel_planning_style = user_preferences.get('travel_planning_style', '').lower()
+        travel_life_role = user_preferences.get('travel_life_role', '').lower()
+        
+        # Get item characteristics
+        item_tags = [tag.lower() for tag in item_data.get("tags", [])]
+        item_type = item_data.get("type", "").lower()
+        item_rating = float(item_data.get("rating", 4.0))
+        item_description = item_data.get("description", "").lower()
+        
+        # 1. Travel Excitement Matching (Weight: 0.25)
+        excitement_score = 0.0
+        if travel_excitement == 'exploring':
+            if any(tag in ['adventure', 'explore', 'trek', 'hike', 'outdoor'] for tag in item_tags):
+                excitement_score = 1.0
+            elif any(tag in ['historical', 'heritage', 'cultural'] for tag in item_tags):
+                excitement_score = 0.8
+        elif travel_excitement == 'relaxing':
+            if any(tag in ['spa', 'yoga', 'meditation', 'peaceful', 'serene'] for tag in item_tags):
+                excitement_score = 1.0
+            elif any(tag in ['lake', 'garden', 'nature'] for tag in item_tags):
+                excitement_score = 0.8
+        elif travel_excitement == 'cultural':
+            if any(tag in ['temple', 'museum', 'heritage', 'cultural', 'traditional'] for tag in item_tags):
+                excitement_score = 1.0
+            elif any(tag in ['historical', 'art', 'architecture'] for tag in item_tags):
+                excitement_score = 0.8
+        
+        score += excitement_score * 0.25
+        total_weight += 0.25
+        
+        # 2. Free Time Preference Matching (Weight: 0.20)
+        free_time_score = 0.0
+        if free_time_preference == 'outdoor':
+            if any(tag in ['outdoor', 'nature', 'adventure', 'trek', 'hike'] for tag in item_tags):
+                free_time_score = 1.0
+        elif free_time_preference == 'indoor':
+            if any(tag in ['museum', 'shopping', 'cinema', 'indoor'] for tag in item_tags):
+                free_time_score = 1.0
+        elif free_time_preference == 'meditation/yoga':
+            if any(tag in ['spa', 'yoga', 'meditation', 'spiritual'] for tag in item_tags):
+                free_time_score = 1.0
+        
+        score += free_time_score * 0.20
+        total_weight += 0.20
+        
+        # 3. Openness to New Experiences (Weight: 0.15)
+        openness_score = 0.0
+        if openness_to_new_experiences == 'always excited':
+            if any(tag in ['unique', 'offbeat', 'local', 'authentic'] for tag in item_tags):
+                openness_score = 1.0
+            elif item_rating < 4.0:  # Less popular places
+                openness_score = 0.8
+        elif openness_to_new_experiences == 'prefer familiar things':
+            if item_rating >= 4.0:  # Popular places
+                openness_score = 1.0
+            elif any(tag in ['popular', 'famous', 'well-known'] for tag in item_tags):
+                openness_score = 0.8
+        
+        score += openness_score * 0.15
+        total_weight += 0.15
+        
+        # 4. Travel Planning Style (Weight: 0.15)
+        planning_score = 0.0
+        if travel_planning_style == 'well-planned itinerary':
+            if any(tag in ['famous', 'must-visit', 'popular'] for tag in item_tags):
+                planning_score = 1.0
+        elif travel_planning_style == 'spontaneous plans':
+            if any(tag in ['hidden', 'offbeat', 'local'] for tag in item_tags):
+                planning_score = 1.0
+        
+        score += planning_score * 0.15
+        total_weight += 0.15
+        
+        # 5. Travel Life Role (Weight: 0.10)
+        role_score = 0.0
+        if travel_life_role == 'adventure seeker':
+            if any(tag in ['adventure', 'trek', 'hike', 'outdoor'] for tag in item_tags):
+                role_score = 1.0
+        elif travel_life_role == 'culture enthusiast':
+            if any(tag in ['cultural', 'heritage', 'temple', 'museum'] for tag in item_tags):
+                role_score = 1.0
+        elif travel_life_role == 'relaxation seeker':
+            if any(tag in ['spa', 'yoga', 'peaceful', 'serene'] for tag in item_tags):
+                role_score = 1.0
+        
+        score += role_score * 0.10
+        total_weight += 0.10
+        
+        # 6. Rating Bonus (Weight: 0.15)
+        rating_score = min(item_rating / 5.0, 1.0)
+        score += rating_score * 0.15
+        total_weight += 0.15
+        
+        # Normalize score
+        if total_weight > 0:
+            return score / total_weight
+        return 0.0
+
+    def _seasonal_optimization(self, item_data: Dict, travel_dates: Dict) -> float:
+        """
+        Calculate seasonal optimization score for an item
+        Returns a multiplier between 0.5 and 1.5
+        """
+        try:
+            start_date = travel_dates.get("start_date", "")
+            if not start_date:
+                return 1.0
+            
+            # Extract month from travel date
+            month = datetime.strptime(start_date, "%Y-%m-%d").strftime("%B").lower()
+            
+            # Get item's best time to visit
+            best_time = item_data.get("best_time_to_visit", "").lower()
+            if not best_time:
+                return 1.0
+            
+            # Check if current month is in best time to visit
+            if month in best_time:
+                return 1.5  # Perfect timing
+            elif any(season in best_time for season in ['winter', 'summer', 'monsoon']):
+                # Check seasonal alignment
+                if month in ['december', 'january', 'february'] and 'winter' in best_time:
+                    return 1.3
+                elif month in ['march', 'april', 'may'] and 'summer' in best_time:
+                    return 1.3
+                elif month in ['june', 'july', 'august', 'september'] and 'monsoon' in best_time:
+                    return 1.3
+                else:
+                    return 0.7  # Off-season
+            else:
+                return 1.0  # No specific seasonal info
+                
+        except Exception as e:
+            print(f"Error in seasonal optimization: {e}")
+            return 1.0
+
+    def _budget_optimization(self, item_data: Dict, user_budget: float, group_size: int) -> float:
+        """
+        Calculate budget optimization score for an item
+        Returns a multiplier between 0.5 and 1.5
+        """
+        try:
+            item_cost = float(item_data.get("cost", 0))
+            if item_cost == 0:
+                return 1.0  # No cost info available
+            
+            # Calculate per-person cost
+            per_person_cost = item_cost / max(group_size, 1)
+            
+            # Calculate budget percentage
+            budget_percentage = (per_person_cost / user_budget) * 100
+            
+            if budget_percentage <= 5:
+                return 1.5  # Very budget-friendly
+            elif budget_percentage <= 15:
+                return 1.2  # Budget-friendly
+            elif budget_percentage <= 30:
+                return 1.0  # Moderate
+            elif budget_percentage <= 50:
+                return 0.8  # Expensive
+            else:
+                return 0.5  # Very expensive
+                
+        except Exception as e:
+            print(f"Error in budget optimization: {e}")
+            return 1.0
+
+    def _get_personalized_recommendations(self, items: List[Dict], user_data: Dict, limit: int = 5) -> List[Dict]:
+        """
+        Get personalized recommendations based on user preferences, seasonal factors, and budget
+        """
+        try:
+            user_preferences = user_data.get("personality_answers", {})
+            travel_dates = user_data.get("travel_dates", {})
+            user_budget = float(user_data.get("budget", 10000))
+            group_size = int(user_data.get("num_of_travellers", 1))
+            
+            scored_items = []
+            
+            for item in items:
+                # Calculate personalization score
+                personalization_score = self._enhanced_personalization_score(item, user_preferences)
+                
+                # Calculate seasonal optimization
+                seasonal_multiplier = self._seasonal_optimization(item, travel_dates)
+                
+                # Calculate budget optimization
+                budget_multiplier = self._budget_optimization(item, user_budget, group_size)
+                
+                # Calculate final score
+                final_score = personalization_score * seasonal_multiplier * budget_multiplier
+                
+                scored_items.append({
+                    **item,
+                    "personalization_score": round(personalization_score, 3),
+                    "seasonal_multiplier": round(seasonal_multiplier, 3),
+                    "budget_multiplier": round(budget_multiplier, 3),
+                    "final_score": round(final_score, 3)
+                })
+            
+            # Sort by final score and return top items
+            sorted_items = sorted(scored_items, key=lambda x: x["final_score"], reverse=True)
+            return sorted_items[:limit]
+            
+        except Exception as e:
+            print(f"Error in personalized recommendations: {e}")
+            return items[:limit]
+
+    def _get_contextual_recommendations(self, base_item: Dict, user_data: Dict, context_type: str) -> Dict:
+        """
+        Get contextual recommendations based on a base item
+        context_type: 'complementary', 'alternative', 'extension'
+        """
+        try:
+            user_preferences = user_data.get("personality_answers", {})
+            base_tags = base_item.get("tags", [])
+            base_type = base_item.get("type", "")
+            
+            # Get all available items from the same city/state
+            state = base_item.get("state", "")
+            city = base_item.get("city", "")
+            
+            if context_type == "complementary":
+                # Find items that complement the base item
+                complementary_items = []
+                if "historical" in base_tags:
+                    complementary_items.extend(["museum", "heritage", "cultural"])
+                if "adventure" in base_tags:
+                    complementary_items.extend(["outdoor", "nature", "trek"])
+                if "spiritual" in base_tags:
+                    complementary_items.extend(["temple", "meditation", "peaceful"])
+                
+            elif context_type == "alternative":
+                # Find alternative items with similar characteristics
+                alternative_items = []
+                if base_type == "heritage":
+                    alternative_items.extend(["fort", "palace", "monument"])
+                elif base_type == "nature":
+                    alternative_items.extend(["park", "garden", "lake"])
+                elif base_type == "adventure":
+                    alternative_items.extend(["trek", "hike", "outdoor"])
+            
+            # Get items from database and filter
+            # This would need to be implemented based on your data structure
+            
+            return {
+                "context_type": context_type,
+                "base_item": base_item.get("name", ""),
+                "recommendations": []  # Would be populated based on database query
+            }
+            
+        except Exception as e:
+            print(f"Error in contextual recommendations: {e}")
+            return {"context_type": context_type, "recommendations": []}
+
+    def _get_why_recommended(self, item: Dict, user_preferences: Dict) -> str:
+        """
+        Generate a personalized explanation of why an item is recommended
+        """
+        try:
+            item_tags = [tag.lower() for tag in item.get("tags", [])]
+            item_type = item.get("type", "").lower()
+            item_rating = float(item.get("rating", 4.0))
+            
+            reasons = []
+            
+            # Check travel excitement match
+            travel_excitement = user_preferences.get('travel_excitement', '').lower()
+            if travel_excitement == 'exploring' and any(tag in ['adventure', 'explore', 'trek', 'hike'] for tag in item_tags):
+                reasons.append("Perfect for adventure seekers")
+            elif travel_excitement == 'relaxing' and any(tag in ['spa', 'yoga', 'peaceful', 'serene'] for tag in item_tags):
+                reasons.append("Ideal for relaxation")
+            elif travel_excitement == 'cultural' and any(tag in ['temple', 'museum', 'heritage', 'cultural'] for tag in item_tags):
+                reasons.append("Great for cultural experiences")
+            
+            # Check free time preference
+            free_time = user_preferences.get('free_time_preference', '').lower()
+            if free_time == 'outdoor' and any(tag in ['outdoor', 'nature', 'adventure'] for tag in item_tags):
+                reasons.append("Matches your outdoor preference")
+            elif free_time == 'indoor' and any(tag in ['museum', 'shopping', 'indoor'] for tag in item_tags):
+                reasons.append("Perfect for indoor activities")
+            
+            # Check openness to new experiences
+            openness = user_preferences.get('openness_to_new_experiences', '').lower()
+            if openness == 'always excited' and any(tag in ['unique', 'offbeat', 'local'] for tag in item_tags):
+                reasons.append("Offers unique experiences")
+            elif openness == 'prefer familiar things' and item_rating >= 4.0:
+                reasons.append("Popular and well-rated")
+            
+            # Add rating-based reason
+            if item_rating >= 4.5:
+                reasons.append("Highly rated by visitors")
+            elif item_rating >= 4.0:
+                reasons.append("Well-rated destination")
+            
+            # Add type-based reason
+            if item_type == "heritage":
+                reasons.append("Rich in historical significance")
+            elif item_type == "nature":
+                reasons.append("Beautiful natural setting")
+            elif item_type == "adventure":
+                reasons.append("Exciting adventure activities")
+            
+            if reasons:
+                return " • ".join(reasons[:3])  # Limit to 3 reasons
+            else:
+                return "Recommended based on your travel preferences"
+                
+        except Exception as e:
+            print(f"Error generating why recommended: {e}")
+            return "Recommended based on your travel preferences"
     
     def get_user_profile(self, user_id: str, trip_id: str) -> str:
         """Get user's complete trip profile from the trip_requests collection"""

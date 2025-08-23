@@ -22,7 +22,7 @@ mongo_db = mongo_client["trawell"]
 mongo_collection = mongo_db["trip_requests"]
 cities_collection = mongo_db["cities"]
 
-# Request model
+# Request models
 class SyncRequest(BaseModel):
     userId: str
     tripId: str
@@ -31,6 +31,11 @@ class ImageRequest(BaseModel):
     place_name: str
     city_name: str
     state_name: str
+
+class EnhancedRecommendationRequest(BaseModel):
+    userId: str
+    tripId: str
+    destination_input: str
 
 @app.post("/sync_trip")
 def sync_trip(request: SyncRequest):
@@ -106,6 +111,34 @@ def get_itinerary(request: ItineraryRequest):
         "data": itinerary
     }
 
+@app.post("/get_enhanced_recommendations")
+def get_enhanced_recommendations(request: EnhancedRecommendationRequest):
+    """
+    Enhanced recommendation API that handles multiple input types:
+    - State input (e.g., "Rajasthan") → returns cities in that state
+    - City input (e.g., "Jaipur") → returns places in that city + nearby cities
+    - Landmark input (e.g., "Hawa Mahal") → returns the landmark + nearby places + related cities
+    """
+    user_id = request.userId
+    trip_id = request.tripId
+    destination_input = request.destination_input
+
+    try:
+        agent = TravelAgent()
+        result = agent.get_enhanced_recommendations(user_id, trip_id, destination_input)
+        
+        if result.get("status") == "error":
+            raise HTTPException(status_code=400, detail=result.get("message"))
+        
+        return {
+            "status": "success",
+            "message": "Enhanced recommendations generated successfully",
+            "data": result
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/get_place_image")
 def get_place_image(request: ImageRequest):
     """Get base64 image for a specific place"""
@@ -131,4 +164,9 @@ def get_place_image(request: ImageRequest):
             "status": "error",
             "message": str(e)
         }
+
+# Health check endpoint
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "message": "Trawell AI API is running"}
 
