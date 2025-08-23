@@ -1,6 +1,5 @@
 import os
 import json
-import pandas as pd
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from pymongo import MongoClient
@@ -24,13 +23,8 @@ cities_collection = db['cities']
 trip_requests_collection = db['trip_requests']
 itineraries_collection = db['itineraries']
 
-# Load city-state mapping
-try:
-    cities_df = pd.read_csv("Indian_Cities_States.csv")
-    CITY_STATE_MAPPING = dict(zip(cities_df['city'].str.lower(), cities_df['state']))
-except Exception as e:
-    print(f"Warning: Could not load city-state mapping: {e}")
-    CITY_STATE_MAPPING = {}
+# Initialize empty mapping - will be populated from MongoDB
+CITY_STATE_MAPPING = {}
 
 # Set up the LLM (OpenAI GPT-4o)
 llm = ChatOpenAI(
@@ -96,44 +90,7 @@ class TravelAgent:
         """
         input_lower = destination_input.strip().lower()
         
-        # Check if it's a state (exact match)
-        all_states = set(CITY_STATE_MAPPING.values())
-        if input_lower in [state.lower() for state in all_states]:
-            return {
-                'input_type': 'state',
-                'parsed_value': input_lower,
-                'state': input_lower,
-                'city': None,
-                'landmark': None,
-                'confidence': 1.0
-            }
-        
-        # Check if it's a city
-        if input_lower in CITY_STATE_MAPPING:
-            state = CITY_STATE_MAPPING[input_lower]
-            return {
-                'input_type': 'city',
-                'parsed_value': input_lower,
-                'state': state.lower(),
-                'city': input_lower,
-                'landmark': None,
-                'confidence': 0.9
-            }
-        
-        # Check for partial city matches
-        for city in CITY_STATE_MAPPING.keys():
-            if input_lower in city or city in input_lower:
-                state = CITY_STATE_MAPPING[city]
-                return {
-                    'input_type': 'city',
-                    'parsed_value': city,
-                    'state': state.lower(),
-                    'city': city,
-                    'landmark': None,
-                    'confidence': 0.8
-                }
-        
-        # Check if it's a landmark by searching in places
+        # First, check if it's a landmark by searching in places
         landmark_result = self._find_landmark_in_places(input_lower)
         if landmark_result:
             return {
@@ -142,20 +99,32 @@ class TravelAgent:
                 'state': landmark_result['state'],
                 'city': landmark_result['city'],
                 'landmark': landmark_result['landmark'],
-                'confidence': 0.7
+                'confidence': 0.9
             }
         
-        # If nothing found, assume it might be a state and try fuzzy matching
-        for state in all_states:
-            if input_lower in state.lower() or state.lower() in input_lower:
-                return {
-                    'input_type': 'state',
-                    'parsed_value': state.lower(),
-                    'state': state.lower(),
-                    'city': None,
-                    'landmark': None,
-                    'confidence': 0.6
-                }
+        # Check if it's a city by searching in MongoDB
+        city_result = self._find_city_in_mongodb(input_lower)
+        if city_result:
+            return {
+                'input_type': 'city',
+                'parsed_value': input_lower,
+                'state': city_result['state'],
+                'city': city_result['city'],
+                'landmark': None,
+                'confidence': 0.8
+            }
+        
+        # Check if it's a state by searching in MongoDB
+        state_result = self._find_state_in_mongodb(input_lower)
+        if state_result:
+            return {
+                'input_type': 'state',
+                'parsed_value': input_lower,
+                'state': input_lower,
+                'city': None,
+                'landmark': None,
+                'confidence': 0.7
+            }
         
         # Default: assume it's a state and return as-is
         return {
@@ -193,6 +162,52 @@ class TravelAgent:
             return None
         except Exception as e:
             print(f"Error searching for landmark: {e}")
+            return None
+    
+    def _find_city_in_mongodb(self, city_name: str) -> Optional[Dict]:
+        """Search for a city in MongoDB"""
+        try:
+            # Search for exact city match
+            city_doc = cities_collection.find_one({"city": {"$regex": f"^{city_name}$", "$options": "i"}})
+            if city_doc:
+                return {
+                    'state': city_doc.get("state", "").lower(),
+                    'city': city_doc.get("city", "").lower()
+                }
+            
+            # Search for partial city match
+            city_doc = cities_collection.find_one({"city": {"$regex": city_name, "$options": "i"}})
+            if city_doc:
+                return {
+                    'state': city_doc.get("state", "").lower(),
+                    'city': city_doc.get("city", "").lower()
+                }
+            
+            return None
+        except Exception as e:
+            print(f"Error searching for city: {e}")
+            return None
+    
+    def _find_state_in_mongodb(self, state_name: str) -> Optional[Dict]:
+        """Search for a state in MongoDB"""
+        try:
+            # Search for exact state match
+            state_doc = cities_collection.find_one({"state": {"$regex": f"^{state_name}$", "$options": "i"}})
+            if state_doc:
+                return {
+                    'state': state_doc.get("state", "").lower()
+                }
+            
+            # Search for partial state match
+            state_doc = cities_collection.find_one({"state": {"$regex": state_name, "$options": "i"}})
+            if state_doc:
+                return {
+                    'state': state_doc.get("state", "").lower()
+                }
+            
+            return None
+        except Exception as e:
+            print(f"Error searching for state: {e}")
             return None
     
     def get_enhanced_recommendations(self, user_id: str, trip_id: str, destination_input: str) -> Dict:
