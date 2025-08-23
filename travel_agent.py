@@ -90,19 +90,7 @@ class TravelAgent:
         """
         input_lower = destination_input.strip().lower()
         
-        # First, check if it's a landmark by searching in places
-        landmark_result = self._find_landmark_in_places(input_lower)
-        if landmark_result:
-            return {
-                'input_type': 'landmark',
-                'parsed_value': input_lower,
-                'state': landmark_result['state'],
-                'city': landmark_result['city'],
-                'landmark': landmark_result['landmark'],
-                'confidence': 0.9
-            }
-        
-        # Check if it's a city by searching in MongoDB
+        # First, check if it's a city by searching in MongoDB (exact match)
         city_result = self._find_city_in_mongodb(input_lower)
         if city_result:
             return {
@@ -111,10 +99,10 @@ class TravelAgent:
                 'state': city_result['state'],
                 'city': city_result['city'],
                 'landmark': None,
-                'confidence': 0.8
+                'confidence': 0.9
             }
         
-        # Check if it's a state by searching in MongoDB
+        # Then check if it's a state by searching in MongoDB
         state_result = self._find_state_in_mongodb(input_lower)
         if state_result:
             return {
@@ -123,6 +111,18 @@ class TravelAgent:
                 'state': input_lower,
                 'city': None,
                 'landmark': None,
+                'confidence': 0.8
+            }
+        
+        # Finally, check if it's a landmark by searching in places
+        landmark_result = self._find_landmark_in_places(input_lower)
+        if landmark_result:
+            return {
+                'input_type': 'landmark',
+                'parsed_value': input_lower,
+                'state': landmark_result['state'],
+                'city': landmark_result['city'],
+                'landmark': landmark_result['landmark'],
                 'confidence': 0.7
             }
         
@@ -167,7 +167,7 @@ class TravelAgent:
     def _find_city_in_mongodb(self, city_name: str) -> Optional[Dict]:
         """Search for a city in MongoDB"""
         try:
-            # Search for exact city match
+            # Search for exact city match first
             city_doc = cities_collection.find_one({"city": {"$regex": f"^{city_name}$", "$options": "i"}})
             if city_doc:
                 return {
@@ -175,7 +175,15 @@ class TravelAgent:
                     'city': city_doc.get("city", "").lower()
                 }
             
-            # Search for partial city match
+            # Search for city names that start with the input (more precise than partial match)
+            city_doc = cities_collection.find_one({"city": {"$regex": f"^{city_name}", "$options": "i"}})
+            if city_doc:
+                return {
+                    'state': city_doc.get("state", "").lower(),
+                    'city': city_doc.get("city", "").lower()
+                }
+            
+            # Only if no exact or start-with match, try partial match
             city_doc = cities_collection.find_one({"city": {"$regex": city_name, "$options": "i"}})
             if city_doc:
                 return {
