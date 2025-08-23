@@ -250,8 +250,8 @@ class TravelAgent:
         """Generate recommendations for state input (original functionality)"""
         state = parsed_input['state']
         
-        # Get all cities in the state
-        cities_data = cities_collection.find({"state": state})
+        # Get all cities in the state (case-insensitive search)
+        cities_data = cities_collection.find({"state": {"$regex": f"^{state}$", "$options": "i"}})
         all_cities = []
         for city_doc in cities_data:
             city_info = {
@@ -291,8 +291,11 @@ class TravelAgent:
         state = parsed_input['state']
         city = parsed_input['city']
         
-        # Get city data
-        city_doc = cities_collection.find_one({"state": state, "city": city})
+        # Get city data (case-insensitive search)
+        city_doc = cities_collection.find_one({
+            "state": {"$regex": f"^{state}$", "$options": "i"}, 
+            "city": {"$regex": f"^{city}$", "$options": "i"}
+        })
         if not city_doc:
             return {"status": "error", "message": f"City {city} not found in {state}"}
         
@@ -355,8 +358,11 @@ class TravelAgent:
         city = parsed_input['city']
         landmark = parsed_input['landmark']
         
-        # Get city data
-        city_doc = cities_collection.find_one({"state": state, "city": city})
+        # Get city data (case-insensitive search)
+        city_doc = cities_collection.find_one({
+            "state": {"$regex": f"^{state}$", "$options": "i"}, 
+            "city": {"$regex": f"^{city}$", "$options": "i"}
+        })
         if not city_doc:
             return {"status": "error", "message": f"City {city} not found in {state}"}
         
@@ -431,7 +437,7 @@ class TravelAgent:
     def _get_nearby_cities(self, state: str, current_city: str) -> List[Dict]:
         """Get nearby cities in the same state"""
         try:
-            cities_data = cities_collection.find({"state": state})
+            cities_data = cities_collection.find({"state": {"$regex": f"^{state}$", "$options": "i"}})
             nearby_cities = []
             
             for city_doc in cities_data:
@@ -457,7 +463,7 @@ class TravelAgent:
     def _get_related_cities(self, state: str, current_city: str, landmark_data: Dict) -> List[Dict]:
         """Get related cities based on landmark characteristics"""
         try:
-            cities_data = cities_collection.find({"state": state})
+            cities_data = cities_collection.find({"state": {"$regex": f"^{state}$", "$options": "i"}})
             related_cities = []
             
             # Get landmark tags and type
