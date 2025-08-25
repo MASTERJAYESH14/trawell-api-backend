@@ -269,8 +269,29 @@ class TravelAgent:
         # Categorize cities
         ai_cities = self._ai_recommend_cities(state, user_data.get("personality_answers", {}), 
                                             user_data.get("budget", 0), user_data.get("num_of_travellers", 1))
-        popular_cities = sorted(all_cities, key=lambda x: float(x.get("rating", 0)), reverse=True)[:5]
-        hidden_gem_cities = [c for c in all_cities if float(c.get("rating", 0)) < 4.0][:5]
+        
+        # Fallback: if AI recommendations fail, use top-rated cities
+        if not ai_cities or len(ai_cities) == 0:
+            ai_cities = sorted(all_cities, key=lambda x: float(x.get("rating", 0)), reverse=True)[:3]
+        
+        # Ensure no duplicates between categories
+        ai_city_names = {c.get("name") for c in ai_cities if c.get("name")}
+        popular_cities = [c for c in sorted(all_cities, key=lambda x: float(x.get("rating", 0)), reverse=True) 
+                         if c.get("name") not in ai_city_names][:5]
+        hidden_gem_cities = [c for c in all_cities 
+                           if c.get("name") not in ai_city_names and 
+                           c.get("name") not in {c.get("name") for c in popular_cities} and
+                           float(c.get("rating", 0)) < 4.0][:5]
+        
+        # Get city details with places and activities for each recommended city
+        city_details = {}
+        all_recommended_cities = ai_cities + popular_cities + hidden_gem_cities
+        
+        for city in all_recommended_cities:
+            city_name = city.get("name", "")
+            if city_name:
+                places_and_activities = self._get_places_and_activities_for_city(state, city_name)
+                city_details[city_name] = places_and_activities
         
         return {
             "status": "success",
@@ -282,6 +303,7 @@ class TravelAgent:
                     "popular": popular_cities,
                     "hidden_gems": hidden_gem_cities
                 },
+                "city_details": city_details,
                 "message": f"Here are city recommendations for {state.title()}"
             }
         }
@@ -310,11 +332,35 @@ class TravelAgent:
         # Get personalized recommendations
         personalized_places = self._get_personalized_recommendations(places, user_data, limit=8)
         
-        # Categorize places (fallback to original method if personalization fails)
+        # Categorize places properly to avoid duplicates
         if len(personalized_places) > 0:
+            # Use personalized places for all categories but ensure no duplicates
+            personalized_names = {p.get("name") for p in personalized_places}
+            
+            # Top personalized places (first 5)
+            top_personalized = personalized_places[:5]
+            
+            # Popular places from personalized (high rating)
             popular_places = [p for p in personalized_places if float(p.get("rating", 0)) >= 4.0][:5]
-            hidden_gem_places = [p for p in personalized_places if float(p.get("rating", 0)) < 4.0][:5]
+            
+            # Hidden gems from personalized (lower rating or unique tags)
+            hidden_gem_places = [p for p in personalized_places 
+                               if (float(p.get("rating", 0)) < 4.0 or 
+                                   any(tag.lower() in ['offbeat', 'hidden', 'local', 'authentic'] 
+                                       for tag in p.get("tags", [])))][:5]
+            
+            # If we don't have enough in any category, fill from remaining places
+            if len(popular_places) < 3:
+                remaining_places = [p for p in places if p.get("name") not in personalized_names]
+                high_rated = [p for p in remaining_places if float(p.get("rating", 0)) >= 4.0]
+                popular_places.extend(high_rated[:3-len(popular_places)])
+            
+            if len(hidden_gem_places) < 3:
+                remaining_places = [p for p in places if p.get("name") not in personalized_names]
+                low_rated = [p for p in remaining_places if float(p.get("rating", 0)) < 4.0]
+                hidden_gem_places.extend(low_rated[:3-len(hidden_gem_places)])
         else:
+            # Fallback to original method if personalization fails
             popular_places = sorted(places, key=lambda x: float(x.get("rating", 0)), reverse=True)[:5]
             hidden_gem_places = [p for p in places if float(p.get("rating", 0)) < 4.0][:5]
         
@@ -1313,29 +1359,70 @@ Return ONLY a valid JSON array like this:
 
 Make it truly personalized based on their personality answers and the enhanced city information. Make it as suitable as possible for the user.
 """
-        response = self.llm.invoke(prompt)
-        ai_recommendations = self._parse_llm_response(response)
-        
-        # Convert AI recommendations to match the structure of popular/hidden gem cities
-        enhanced_ai_cities = []
-        for ai_city in ai_recommendations:
-            # Find the full city data from available_cities
-            matching_city = next((city for city in available_cities if city.get("name") == ai_city.get("name")), None)
-            if matching_city:
+        try:
+            response = self.llm.invoke(prompt)
+            ai_recommendations = self._parse_llm_response(response)
+            
+            # Convert AI recommendations to match the structure of popular/hidden gem cities
+            enhanced_ai_cities = []
+            for ai_city in ai_recommendations:
+                # Find the full city data from available_cities
+                matching_city = next((city for city in available_cities if city.get("name") == ai_city.get("name")), None)
+                if matching_city:
+                    enhanced_city = {
+                        "name": ai_city.get("name"),
+                        "rating": matching_city.get("rating", 4.0),
+                        "description": ai_city.get("description", matching_city.get("description", "")),
+                        "tags": matching_city.get("tags", []),
+                        "type": matching_city.get("type", "heritage_city"),
+                        "accessibility": matching_city.get("accessibility", "well_connected"),
+                        "highlights": matching_city.get("highlights", []),
+                        "image_url": ai_city.get("image_url", matching_city.get("image_url", "")),
+                        "why_recommended": ai_city.get("why_recommended", "")
+                    }
+                    enhanced_ai_cities.append(enhanced_city)
+            
+            # If AI recommendations failed or returned empty, use top-rated cities as fallback
+            if not enhanced_ai_cities:
+                print(f"AI recommendations failed for {destination}, using fallback")
+                # Return top 3 rated cities as AI recommendations
+                top_cities = sorted(available_cities, key=lambda x: float(x.get("rating", 0)), reverse=True)[:3]
+                for city in top_cities:
+                    enhanced_city = {
+                        "name": city.get("name"),
+                        "rating": city.get("rating", 4.0),
+                        "description": city.get("description", ""),
+                        "tags": city.get("tags", []),
+                        "type": city.get("type", "heritage_city"),
+                        "accessibility": city.get("accessibility", "well_connected"),
+                        "highlights": city.get("highlights", []),
+                        "image_url": city.get("image_url", ""),
+                        "why_recommended": "Top-rated destination in the region"
+                    }
+                    enhanced_ai_cities.append(enhanced_city)
+            
+            return enhanced_ai_cities
+            
+        except Exception as e:
+            print(f"Error in AI city recommendations: {e}")
+            # Return top 3 rated cities as fallback
+            top_cities = sorted(available_cities, key=lambda x: float(x.get("rating", 0)), reverse=True)[:3]
+            enhanced_ai_cities = []
+            for city in top_cities:
                 enhanced_city = {
-                    "name": ai_city.get("name"),
-                    "rating": matching_city.get("rating", 4.0),
-                    "description": ai_city.get("description", matching_city.get("description", "")),
-                    "tags": matching_city.get("tags", []),
-                    "type": matching_city.get("type", "heritage_city"),
-                    "accessibility": matching_city.get("accessibility", "well_connected"),
-                    "highlights": matching_city.get("highlights", []),
-                    "image_url": ai_city.get("image_url", matching_city.get("image_url", "")),
-                    "why_recommended": ai_city.get("why_recommended", "")
+                    "name": city.get("name"),
+                    "rating": city.get("rating", 4.0),
+                    "description": city.get("description", ""),
+                    "tags": city.get("tags", []),
+                    "type": city.get("type", "heritage_city"),
+                    "accessibility": city.get("accessibility", "well_connected"),
+                    "highlights": city.get("highlights", []),
+                    "image_url": city.get("image_url", ""),
+                    "why_recommended": "Top-rated destination in the region"
                 }
                 enhanced_ai_cities.append(enhanced_city)
-        
-        return enhanced_ai_cities
+            
+            return enhanced_ai_cities
 
     def safe_int(self, val, default=0):
         try:
