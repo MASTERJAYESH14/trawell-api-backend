@@ -1432,7 +1432,7 @@ Make it truly personalized based on their personality answers and the enhanced c
 
     def _popular_cities(self, destination):
         # Get all cities in the destination state with enhanced information
-        cities_data = cities_collection.find({"state": destination})
+        cities_data = cities_collection.find({"state": {"$regex": f"^{destination}$", "$options": "i"}})
         cities = []
         for city_doc in cities_data:
             city_info = {
@@ -1453,7 +1453,7 @@ Make it truly personalized based on their personality answers and the enhanced c
 
     def _hidden_gem_cities(self, destination):
         # Get all cities in the destination state with enhanced information
-        cities_data = cities_collection.find({"state": destination})
+        cities_data = cities_collection.find({"state": {"$regex": f"^{destination}$", "$options": "i"}})
         cities = []
         for city_doc in cities_data:
             city_info = {
@@ -1483,7 +1483,10 @@ Make it truly personalized based on their personality answers and the enhanced c
 
     def _get_places_and_activities_for_city(self, destination, city_name):
         """Get places and their activities for a specific city with enhanced city information"""
-        city_doc = cities_collection.find_one({"state": destination, "city": city_name})
+        city_doc = cities_collection.find_one({
+            "state": {"$regex": f"^{destination}$", "$options": "i"}, 
+            "city": {"$regex": f"^{city_name}$", "$options": "i"}
+        })
         if not city_doc:
             return {"places": [], "activities": [], "city_info": {}}
         
@@ -1526,7 +1529,7 @@ Make it truly personalized based on their personality answers and the enhanced c
 
     def _ai_recommend_activities(self, destination, travel_preferences, budget, start_date=None, end_date=None):
         # Get all cities in the destination state to extract activities from all places
-        cities_data = cities_collection.find({"state": destination})
+        cities_data = cities_collection.find({"state": {"$regex": f"^{destination}$", "$options": "i"}})
         if not cities_data:
             return []
         
